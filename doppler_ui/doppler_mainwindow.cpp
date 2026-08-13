@@ -35,10 +35,21 @@ extern "C" {
 #include "OtaUpgrade.h"
 #include "log.h"
 #include "FirmwareVersion.h"
+#include "SocketLink.h"
+#include "UplinkOffline.h"
 }
 
 namespace {
 const size_t kDeviceLogExportMax = 512U * 1024U;
+
+void setLabelTextIfChanged(QLabel *lab, const QString &text)
+{
+    if (lab == 0)
+        return;
+    if (lab->text() == text)
+        return;
+    lab->setText(text);
+}
 }
 
 DopplerMainWindow::DopplerMainWindow(QWidget *parent)
@@ -53,9 +64,11 @@ DopplerMainWindow::DopplerMainWindow(QWidget *parent)
     , m_pageWater(0)
     , m_pageOta(0)
     , m_pageDevLog(0)
+    , m_lblStatus(0)
     , m_cfgActiveEdit(0)
     , m_bizOk(false)
     , m_otaWasBusy(false)
+    , m_otaUiLocked(false)
 {
     buildUi();
     m_uptime.start();
@@ -137,6 +150,7 @@ void DopplerMainWindow::buildUi()
         "QFrame#topBar { background-color:#ffffff; border:none; border-bottom:3px solid #0b7a7a; }"
         "QLabel#brand { color:#102033; font-size:28px; font-weight:bold; }"
         "QLabel#clock { color:#334155; font-size:22px; font-weight:bold; }"
+        "QLabel#statusLine { color:#243447; font-size:18px; font-weight:bold; }"
         "QLabel#metaText { color:#243447; font-size:20px; font-weight:bold; }"
         "QFrame#metricTile { background-color:#ffffff; border:2px solid #c9d4df; border-radius:10px; }"
         "QLabel#metricCap { color:#3b4d61; font-size:18px; font-weight:bold; }"
@@ -186,9 +200,6 @@ void DopplerMainWindow::buildUi()
     m_title->setObjectName(QStringLiteral("brand"));
     m_lblClock = new QLabel(topBar);
     m_lblClock->setObjectName(QStringLiteral("clock"));
-    m_btnExit = new QPushButton(QStringLiteral("退出"), topBar);
-    m_btnExit->setObjectName(QStringLiteral("exitBtn"));
-    connect(m_btnExit, SIGNAL(clicked()), this, SLOT(onExit()));
 
     QHBoxLayout *topLay = new QHBoxLayout(topBar);
     topLay->setContentsMargins(16, 12, 16, 12);
@@ -196,7 +207,10 @@ void DopplerMainWindow::buildUi()
     topLay->addWidget(m_title);
     topLay->addStretch(1);
     topLay->addWidget(m_lblClock);
-    topLay->addWidget(m_btnExit);
+
+    m_lblStatus = new QLabel(QStringLiteral("状态：启动中…"), m_pageHome);
+    m_lblStatus->setObjectName(QStringLiteral("statusLine"));
+    m_lblStatus->setWordWrap(true);
 
     QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1\n(m/s)"), &m_valVel1);
     QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2\n(m/s)"), &m_valVel2);
@@ -221,22 +235,16 @@ void DopplerMainWindow::buildUi()
     grid->setColumnStretch(1, 1);
     grid->setColumnStretch(2, 1);
 
-    m_btnCollect = new QPushButton(QStringLiteral("手动采集"), m_pageHome);
-    m_btnReport = new QPushButton(QStringLiteral("手动上报"), m_pageHome);
     m_btnFunc = new QPushButton(QStringLiteral("菜单"), m_pageHome);
     m_btnFunc->setObjectName(QStringLiteral("secondaryBtn"));
     m_btnLog = new QPushButton(QStringLiteral("屏显日志"), m_pageHome);
     m_btnLog->setObjectName(QStringLiteral("secondaryBtn"));
-    connect(m_btnCollect, SIGNAL(clicked()), this, SLOT(onCollect()));
-    connect(m_btnReport, SIGNAL(clicked()), this, SLOT(onReport()));
     connect(m_btnFunc, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
     connect(m_btnLog, SIGNAL(clicked()), this, SLOT(onShowLogPage()));
 
     QHBoxLayout *btnLay = new QHBoxLayout;
     btnLay->setSpacing(12);
     btnLay->setContentsMargins(0, 4, 0, 0);
-    btnLay->addWidget(m_btnCollect, 1);
-    btnLay->addWidget(m_btnReport, 1);
     btnLay->addWidget(m_btnFunc, 1);
     btnLay->addWidget(m_btnLog, 1);
 
@@ -247,6 +255,7 @@ void DopplerMainWindow::buildUi()
     QVBoxLayout *body = new QVBoxLayout;
     body->setContentsMargins(18, 16, 18, 16);
     body->setSpacing(14);
+    body->addWidget(m_lblStatus, 0);
     body->addLayout(grid, 1);
     body->addLayout(btnLay, 0);
     homeLay->addLayout(body, 1);
@@ -283,31 +292,37 @@ void DopplerMainWindow::buildUi()
     funcTop->addWidget(m_btnBackFunc);
 
     m_btnStartTest = new QPushButton(QStringLiteral("加测（采一轮并上报）"), m_pageFunc);
+    m_btnFuncCollect = new QPushButton(QStringLiteral("手动采集"), m_pageFunc);
+    m_btnFuncReport = new QPushButton(QStringLiteral("手动上报"), m_pageFunc);
     m_btnOpenWater = new QPushButton(QStringLiteral("设置水位后测流"), m_pageFunc);
     m_btnViewConfig = new QPushButton(QStringLiteral("查看配置"), m_pageFunc);
     m_btnViewConfig->setObjectName(QStringLiteral("secondaryBtn"));
-    m_btnOtaPage = new QPushButton(QStringLiteral("升级进度 / 结果"), m_pageFunc);
-    m_btnOtaPage->setObjectName(QStringLiteral("secondaryBtn"));
     m_btnDevLogPage = new QPushButton(QStringLiteral("设备完整日志"), m_pageFunc);
     m_btnDevLogPage->setObjectName(QStringLiteral("secondaryBtn"));
     m_btnReboot = new QPushButton(QStringLiteral("重启设备"), m_pageFunc);
     m_btnReboot->setObjectName(QStringLiteral("dangerBtn"));
+    m_btnExit = new QPushButton(QStringLiteral("退出程序"), m_pageFunc);
+    m_btnExit->setObjectName(QStringLiteral("dangerBtn"));
     connect(m_btnStartTest, SIGNAL(clicked()), this, SLOT(onStartTest()));
+    connect(m_btnFuncCollect, SIGNAL(clicked()), this, SLOT(onCollect()));
+    connect(m_btnFuncReport, SIGNAL(clicked()), this, SLOT(onReport()));
     connect(m_btnOpenWater, SIGNAL(clicked()), this, SLOT(onShowWaterPage()));
     connect(m_btnViewConfig, SIGNAL(clicked()), this, SLOT(onShowConfigPage()));
-    connect(m_btnOtaPage, SIGNAL(clicked()), this, SLOT(onShowOtaPage()));
     connect(m_btnDevLogPage, SIGNAL(clicked()), this, SLOT(onShowDeviceLogPage()));
     connect(m_btnReboot, SIGNAL(clicked()), this, SLOT(onRebootDevice()));
+    connect(m_btnExit, SIGNAL(clicked()), this, SLOT(onExit()));
 
     QGridLayout *funcGrid = new QGridLayout;
     funcGrid->setHorizontalSpacing(12);
     funcGrid->setVerticalSpacing(12);
-    funcGrid->addWidget(m_btnStartTest, 0, 0);
-    funcGrid->addWidget(m_btnOpenWater, 0, 1);
-    funcGrid->addWidget(m_btnViewConfig, 1, 0);
-    funcGrid->addWidget(m_btnOtaPage, 1, 1);
-    funcGrid->addWidget(m_btnDevLogPage, 2, 0);
-    funcGrid->addWidget(m_btnReboot, 2, 1);
+    funcGrid->addWidget(m_btnFuncCollect, 0, 0);
+    funcGrid->addWidget(m_btnFuncReport, 0, 1);
+    funcGrid->addWidget(m_btnStartTest, 1, 0);
+    funcGrid->addWidget(m_btnOpenWater, 1, 1);
+    funcGrid->addWidget(m_btnViewConfig, 2, 0);
+    funcGrid->addWidget(m_btnDevLogPage, 2, 1);
+    funcGrid->addWidget(m_btnReboot, 3, 0);
+    funcGrid->addWidget(m_btnExit, 3, 1);
 
     QVBoxLayout *funcLay = new QVBoxLayout(m_pageFunc);
     funcLay->setContentsMargins(16, 14, 16, 14);
@@ -316,7 +331,7 @@ void DopplerMainWindow::buildUi()
     funcLay->addLayout(funcGrid);
     funcLay->addStretch(1);
     QLabel *otaNote = new QLabel(
-        QStringLiteral("说明：固件升级仍由网页下发。本机可查看配置，并可修改站号/密码/采集上报间隔等常用项。"),
+        QStringLiteral("说明：固件由网页下发；升级时本机自动全屏显示进度并锁定操作。可查看配置，并可修改站号/密码/间隔等。"),
         m_pageFunc);
     otaNote->setObjectName(QStringLiteral("hintText"));
     otaNote->setWordWrap(true);
@@ -497,7 +512,9 @@ void DopplerMainWindow::buildUi()
     otaTitle->setObjectName(QStringLiteral("pageTitle"));
     m_btnBackOta = new QPushButton(QStringLiteral("返回"), m_pageOta);
     m_btnBackOta->setObjectName(QStringLiteral("backBtn"));
-    connect(m_btnBackOta, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
+    connect(m_btnBackOta, SIGNAL(clicked()), this, SLOT(onBackHome()));
+    /* 升级中隐藏返回，结束后失败才允许离开 */
+    m_btnBackOta->setVisible(false);
     QHBoxLayout *otaTop = new QHBoxLayout;
     otaTop->addWidget(otaTitle);
     otaTop->addStretch(1);
@@ -517,7 +534,7 @@ void DopplerMainWindow::buildUi()
     m_lblOtaResult->setObjectName(QStringLiteral("metaText"));
     m_lblOtaResult->setWordWrap(true);
     QLabel *otaHint = new QLabel(
-        QStringLiteral("本页只显示本机接收进度与上报结果；成功后设备会自动重启。"),
+        QStringLiteral("固件由网页下发。升级时自动全屏并锁定操作，请勿断电；成功后将重启。"),
         m_pageOta);
     otaHint->setObjectName(QStringLiteral("hintText"));
     otaHint->setWordWrap(true);
@@ -591,8 +608,10 @@ void DopplerMainWindow::buildUi()
 void DopplerMainWindow::setBizEnabled(bool on)
 {
     m_bizOk = on;
-    m_btnCollect->setEnabled(on);
-    m_btnReport->setEnabled(on);
+    if (m_otaUiLocked)
+        return;
+    m_btnFuncCollect->setEnabled(on);
+    m_btnFuncReport->setEnabled(on);
     m_btnStartTest->setEnabled(on);
     m_btnApplyWater->setEnabled(on);
     m_btnEditConfig->setEnabled(on);
@@ -610,16 +629,22 @@ void DopplerMainWindow::appendUiLog(const QString &line)
 
 void DopplerMainWindow::onShowLogPage()
 {
+    if (m_otaUiLocked)
+        return;
     m_stack->setCurrentWidget(m_pageLog);
 }
 
 void DopplerMainWindow::onShowFuncPage()
 {
+    if (m_otaUiLocked)
+        return;
     m_stack->setCurrentWidget(m_pageFunc);
 }
 
 void DopplerMainWindow::onShowWaterPage()
 {
+    if (m_otaUiLocked)
+        return;
     m_stack->setCurrentWidget(m_pageWater);
 }
 
@@ -629,8 +654,30 @@ void DopplerMainWindow::onShowOtaPage()
     m_stack->setCurrentWidget(m_pageOta);
 }
 
+void DopplerMainWindow::setOtaUiLocked(bool locked)
+{
+    if (m_otaUiLocked == locked)
+        return;
+    m_otaUiLocked = locked;
+
+    m_btnFuncCollect->setEnabled(!locked && m_bizOk);
+    m_btnFuncReport->setEnabled(!locked && m_bizOk);
+    m_btnLog->setEnabled(!locked);
+    m_btnFunc->setEnabled(!locked);
+    m_btnExit->setEnabled(!locked);
+    m_btnBackOta->setVisible(!locked);
+    m_btnBackOta->setEnabled(!locked);
+
+    if (locked) {
+        m_stack->setCurrentWidget(m_pageOta);
+        appendUiLog(QStringLiteral("OTA 进行中，界面已锁定"));
+    }
+}
+
 void DopplerMainWindow::onShowDeviceLogPage()
 {
+    if (m_otaUiLocked)
+        return;
     m_stack->setCurrentWidget(m_pageDevLog);
 }
 
@@ -692,22 +739,35 @@ void DopplerMainWindow::updateOtaUi()
         m_otaProgress->setValue(0);
         m_lblOtaDetail->setText(QStringLiteral("当前固件版本：%1").arg(QString::fromLatin1(fw)));
         m_lblOtaResult->setText(QStringLiteral("最近结果：尚无"));
+        setOtaUiLocked(false);
         return;
     }
 
-    const QString state = otaStatusText(st.status);
-    if (st.busy) {
-        m_lblOtaState->setText(QStringLiteral("状态：进行中 · %1").arg(state));
+    const bool blocking = st.busy
+            || st.reboot_pending
+            || st.status == OTA_STATUS_RECEIVING
+            || st.status == OTA_STATUS_APPLYING
+            || st.status == OTA_STATUS_OK;
+
+    if (blocking) {
         if (!m_otaWasBusy) {
             appendUiLog(QStringLiteral("OTA 开始升级"));
             m_otaWasBusy = true;
         }
+        setOtaUiLocked(true);
+        if (m_stack->currentWidget() != m_pageOta)
+            m_stack->setCurrentWidget(m_pageOta);
+        m_lblOtaState->setText(QStringLiteral("状态：进行中 · %1").arg(otaStatusText(st.status)));
     } else {
-        m_lblOtaState->setText(QStringLiteral("状态：%1").arg(state));
         if (m_otaWasBusy) {
             appendUiLog(QStringLiteral("OTA 会话结束"));
             m_otaWasBusy = false;
+            /* 失败结束：解锁并显示返回，便于回到首页 */
+            setOtaUiLocked(false);
+            if (m_stack->currentWidget() == m_pageOta)
+                m_btnBackOta->setVisible(true);
         }
+        m_lblOtaState->setText(QStringLiteral("状态：%1").arg(otaStatusText(st.status)));
     }
 
     int pct = 0;
@@ -729,14 +789,14 @@ void DopplerMainWindow::updateOtaUi()
             ? QStringLiteral("B") : QStringLiteral("A");
     QString detail = QStringLiteral("当前固件：%1 · 活动槽 %2\n")
             .arg(QString::fromLatin1(fw)).arg(slot);
-    if (st.busy || st.status == OTA_STATUS_RECEIVING || st.status == OTA_STATUS_APPLYING) {
+    if (blocking) {
         detail += QStringLiteral("会话版本：%1\n包进度：%2 / %3 · 已收 %4 字节 / 文件 %5")
                 .arg(QString::fromLatin1(st.version))
                 .arg(st.pkt_expect > 0 ? st.pkt_expect - 1 : 0)
                 .arg(st.pkt_total)
                 .arg(st.recv_size)
                 .arg(st.file_size);
-        if (st.reboot_pending)
+        if (st.reboot_pending || st.status == OTA_STATUS_OK)
             detail += QStringLiteral("\n即将重启以激活新固件…");
     } else {
         detail += QStringLiteral("等待网页下发固件包。");
@@ -808,12 +868,14 @@ void DopplerMainWindow::loadDeviceLog(int filterMode)
 
 void DopplerMainWindow::onBackHome()
 {
+    if (m_otaUiLocked)
+        return;
     m_stack->setCurrentWidget(m_pageHome);
 }
 
 void DopplerMainWindow::onStartTest()
 {
-    if (!m_bizOk)
+    if (m_otaUiLocked || !m_bizOk)
         return;
     Sensor_RequestStartTestReport();
     appendUiLog(QStringLiteral("已触发加测"));
@@ -850,7 +912,7 @@ void DopplerMainWindow::onNumPadClear()
 
 void DopplerMainWindow::onApplyWaterCm()
 {
-    if (!m_bizOk)
+    if (m_otaUiLocked || !m_bizOk)
         return;
     bool ok = false;
     const int cm = m_editWaterCm->text().trimmed().toInt(&ok);
@@ -985,13 +1047,15 @@ bool DopplerMainWindow::writeEditableFieldsToConf()
 
 void DopplerMainWindow::onShowConfigPage()
 {
+    if (m_otaUiLocked)
+        return;
     loadConfigToViewer();
     m_stack->setCurrentWidget(m_pageConfig);
 }
 
 void DopplerMainWindow::onShowConfigEditPage()
 {
-    if (!m_bizOk)
+    if (m_otaUiLocked || !m_bizOk)
         return;
     loadEditableFieldsFromConf();
     m_stack->setCurrentWidget(m_pageConfigEdit);
@@ -1082,6 +1146,8 @@ void DopplerMainWindow::onSaveConfigFields()
 
 void DopplerMainWindow::onRebootDevice()
 {
+    if (m_otaUiLocked)
+        return;
     const int ret = QMessageBox::warning(
         this, QStringLiteral("重启设备"),
         QStringLiteral("确定要重启整机吗？"),
@@ -1098,10 +1164,12 @@ void DopplerMainWindow::onBusinessReady(int result)
     if (result == 0) {
         setBizEnabled(true);
         appendUiLog(QStringLiteral("业务启动成功"));
+        updateHomeStatus();
         onRefresh();
     } else {
         setBizEnabled(false);
         appendUiLog(QStringLiteral("业务启动失败，请检查 doppler.conf"));
+        updateHomeStatus();
     }
 }
 
@@ -1112,29 +1180,63 @@ void DopplerMainWindow::onStartBusiness()
     onBusinessReady(rc);
 }
 
+void DopplerMainWindow::updateHomeStatus()
+{
+    if (m_lblStatus == 0)
+        return;
+
+    QString line;
+    if (!m_bizOk) {
+        line = QStringLiteral("状态：业务未就绪 · 请检查 doppler.conf / 串口");
+    } else {
+        const QString sensor = g_stMeasureConfig.u8SensorSimulate
+                ? QStringLiteral("传感器：模拟")
+                : QStringLiteral("传感器：真实");
+        QString link;
+        if (WebLink_IsSocketMode()) {
+            link = SocketLink_IsConnected()
+                    ? QStringLiteral("链路：Socket 已连接")
+                    : QStringLiteral("链路：Socket 未连接");
+        } else {
+            link = QStringLiteral("链路：DTU 串口");
+        }
+        if (UplinkOffline_IsOnline())
+            link += QStringLiteral(" · 在线");
+        else
+            link += QStringLiteral(" · 离线缓存");
+        line = QStringLiteral("状态：运行中 · %1 · %2").arg(sensor, link);
+    }
+    setLabelTextIfChanged(m_lblStatus, line);
+}
+
 void DopplerMainWindow::onRefresh()
 {
-    const QDateTime now = QDateTime::currentDateTime();
-    m_lblClock->setText(now.toString(QStringLiteral("yyyy-MM-dd  hh:mm:ss")));
+    setLabelTextIfChanged(m_lblClock,
+                          QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd  hh:mm:ss")));
 
     const qint64 ms = m_uptime.elapsed();
     const int sec = static_cast<int>(ms / 1000);
     const int h = sec / 3600;
     const int m = (sec % 3600) / 60;
     const int s = sec % 60;
-    m_valUptime->setText(QStringLiteral("%1:%2:%3")
-                         .arg(h, 2, 10, QChar('0'))
-                         .arg(m, 2, 10, QChar('0'))
-                         .arg(s, 2, 10, QChar('0')));
+    setLabelTextIfChanged(m_valUptime,
+                          QStringLiteral("%1:%2:%3")
+                              .arg(h, 2, 10, QChar('0'))
+                              .arg(m, 2, 10, QChar('0'))
+                              .arg(s, 2, 10, QChar('0')));
 
-    /* OTA 页每秒刷新；其它页也跟踪 busy，便于首页状态提示 */
-    if (m_bizOk && (m_stack->currentWidget() == m_pageOta || OtaUpgrade_IsBusy() || m_otaWasBusy))
-        updateOtaUi();
+    updateHomeStatus();
 
-    if (!m_bizOk)
-        return;
+    /* 空闲只做轻量 busy 探测；进行中或已在 OTA 页再刷详情 */
+    if (m_bizOk) {
+        const bool otaBusy = OtaUpgrade_IsBusy();
+        if (otaBusy || m_otaWasBusy || m_otaUiLocked
+                || m_stack->currentWidget() == m_pageOta) {
+            updateOtaUi();
+        }
+    }
 
-    if (OtaUpgrade_IsBusy())
+    if (!m_bizOk || m_otaUiLocked || OtaUpgrade_IsBusy())
         return;
 
     TrafficReportSnapshot snap;
@@ -1150,23 +1252,23 @@ void DopplerMainWindow::onRefresh()
         if (snap.u8LineCount > 1 && snap.astLines[1].u8Valid)
             vel2 = snap.astLines[1].stRaw.fFlowVelocity;
 
-        m_valVel1->setText(QStringLiteral("%1").arg(vel1, 0, 'f', 3));
-        m_valVel2->setText(QStringLiteral("%1").arg(vel2, 0, 'f', 3));
-        m_valWater->setText(QStringLiteral("%1").arg(water, 0, 'f', 2));
-        m_valSecFlow->setText(QStringLiteral("%1").arg(secQ, 0, 'f', 3));
-        m_valHourFlow->setText(QStringLiteral("%1").arg(hourQ, 0, 'f', 1));
+        setLabelTextIfChanged(m_valVel1, QStringLiteral("%1").arg(vel1, 0, 'f', 3));
+        setLabelTextIfChanged(m_valVel2, QStringLiteral("%1").arg(vel2, 0, 'f', 3));
+        setLabelTextIfChanged(m_valWater, QStringLiteral("%1").arg(water, 0, 'f', 2));
+        setLabelTextIfChanged(m_valSecFlow, QStringLiteral("%1").arg(secQ, 0, 'f', 3));
+        setLabelTextIfChanged(m_valHourFlow, QStringLiteral("%1").arg(hourQ, 0, 'f', 1));
     } else {
-        m_valVel1->setText(QStringLiteral("--"));
-        m_valVel2->setText(QStringLiteral("--"));
-        m_valWater->setText(QStringLiteral("--"));
-        m_valSecFlow->setText(QStringLiteral("--"));
-        m_valHourFlow->setText(QStringLiteral("--"));
+        setLabelTextIfChanged(m_valVel1, QStringLiteral("--"));
+        setLabelTextIfChanged(m_valVel2, QStringLiteral("--"));
+        setLabelTextIfChanged(m_valWater, QStringLiteral("--"));
+        setLabelTextIfChanged(m_valSecFlow, QStringLiteral("--"));
+        setLabelTextIfChanged(m_valHourFlow, QStringLiteral("--"));
     }
 }
 
 void DopplerMainWindow::onCollect()
 {
-    if (!m_bizOk)
+    if (m_otaUiLocked || !m_bizOk)
         return;
     ReadFlowMeterData(NULL);
     appendUiLog(QStringLiteral("已触发手动采集"));
@@ -1175,7 +1277,7 @@ void DopplerMainWindow::onCollect()
 
 void DopplerMainWindow::onReport()
 {
-    if (!m_bizOk)
+    if (m_otaUiLocked || !m_bizOk)
         return;
     SendDopplerRealData(NULL);
     appendUiLog(QStringLiteral("已触发手动上报"));
@@ -1183,6 +1285,17 @@ void DopplerMainWindow::onReport()
 
 void DopplerMainWindow::onExit()
 {
+    if (m_otaUiLocked) {
+        QMessageBox::warning(this, QStringLiteral("升级中"),
+                             QStringLiteral("正在升级固件，请勿退出或断电。"));
+        return;
+    }
+    const int ret = QMessageBox::question(
+        this, QStringLiteral("退出程序"),
+        QStringLiteral("确定要退出监测程序吗？退出后需手动或开机脚本再启动。"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (ret != QMessageBox::Yes)
+        return;
     hide();
     QApplication::processEvents();
     BoardBuzzer::forceOff();

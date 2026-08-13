@@ -58,6 +58,8 @@ private:
     void buildUi();
     void appendUiLog(const QString &line);
     void setBizEnabled(bool on);
+    void setOtaUiLocked(bool locked);
+    void updateHomeStatus();
     void loadConfigToViewer();
     void loadEditableFieldsFromConf();
     bool writeEditableFieldsToConf();
@@ -84,14 +86,15 @@ private:
 
     QLabel *m_title;
     QLabel *m_lblClock;
+    QLabel *m_lblStatus;
     QLabel *m_valVel1;
     QLabel *m_valVel2;
     QLabel *m_valWater;
     QLabel *m_valSecFlow;
     QLabel *m_valHourFlow;
     QLabel *m_valUptime;
-    QPushButton *m_btnCollect;
-    QPushButton *m_btnReport;
+    QPushButton *m_btnFuncCollect;
+    QPushButton *m_btnFuncReport;
     QPushButton *m_btnLog;
     QPushButton *m_btnFunc;
     QPushButton *m_btnExit;
@@ -107,7 +110,6 @@ private:
     QPushButton *m_btnEditConfig;
     QPushButton *m_btnSaveConfigFields;
     QPushButton *m_btnReboot;
-    QPushButton *m_btnOtaPage;
     QPushButton *m_btnDevLogPage;
     QPushButton *m_btnBackOta;
     QPushButton *m_btnBackDevLog;
@@ -134,6 +136,7 @@ private:
     QElapsedTimer m_uptime;
     bool m_bizOk;
     bool m_otaWasBusy;
+    bool m_otaUiLocked;
 };
 
 #endif

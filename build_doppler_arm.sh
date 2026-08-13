@@ -59,6 +59,11 @@ cp -f "$DST/doppler/doppler.conf" "$DST/doppler.conf"
 echo "==> qmake"
 "$QT_QMAKE" ./doppler_gt6606.pro
 
+# 版本号来自 FirmwareVersion.c 的 __DATE__/__TIME__；不重编该 .o 则版本不变
+echo "==> bump firmware version object"
+rm -f ./FirmwareVersion.o
+touch "$DST/doppler_bus/Source/FirmwareVersion.c"
+
 echo "==> make -j$JOBS"
 make -j"$JOBS"
 
