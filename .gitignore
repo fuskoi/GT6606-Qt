@@ -1,0 +1,5 @@
+*.o
+moc_*.cpp
+Makefile
+doppler_gt6606
+doppler_gt6606.ota

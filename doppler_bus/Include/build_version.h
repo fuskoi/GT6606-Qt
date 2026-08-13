@@ -1,0 +1,4 @@
+#ifndef BUILD_VERSION_H
+#define BUILD_VERSION_H
+#define FW_BUILD_EPOCH 1786525194u
+#endif

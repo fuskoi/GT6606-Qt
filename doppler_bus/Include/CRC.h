@@ -1,0 +1,12 @@
+#ifndef _CRC_H
+#define _CRC_H
+#include "Common.h"
+
+uint16_t CRC16_Modbus(const uint8_t *_pBuf, uint16_t _usLen);
+uint16_t swap_u16(uint16_t shortValue);
+int16_t swap_i16(int16_t shortValue);
+uint32_t swap_u32(uint32_t ResData);
+int32_t swap_i32(int32_t ResData);
+void mSleep(uint32_t ms);
+
+#endif
