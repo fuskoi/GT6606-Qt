@@ -47,6 +47,8 @@ static struct timeval s_stUpPartialSince;
 
 /* 半包无增长超过此时长则放弃当前声明长度 */
 #define DOWNLINK_PARTIAL_STALL_MS  2500U
+/* 4G/Socket OTA 帧 ~2KB，段间隔抖动大；2.5s 易误杀半包导致卡在十余包 */
+#define DOWNLINK_PARTIAL_STALL_OTA_MS  20000U
 /* OTA 时 F2 回灌更短：卡太久会挡住后面的 102 大包 */
 #define UPLINK_PARTIAL_STALL_MS    800U
 #define UPLINK_PARTIAL_STALL_OTA_MS 400U
@@ -1168,7 +1170,9 @@ int Proc_DTU_RecData(KFIFO_ID pData, WORD* pUsed, int type)
                 s_u16PartialNeed = frameLen;
                 s_u32PartialHave = u32fifolen;
                 gettimeofday(&s_stPartialSince, NULL);
-            } else if (cmd_ms_since(&s_stPartialSince) >= DOWNLINK_PARTIAL_STALL_MS) {
+            } else if (cmd_ms_since(&s_stPartialSince) >=
+                       (OtaUpgrade_IsBusy() ? DOWNLINK_PARTIAL_STALL_OTA_MS
+                                            : DOWNLINK_PARTIAL_STALL_MS)) {
                 /*
                  * 声明长度长期无增长：整段丢弃后重同步。
                  * OTA 亦同样处理——半包已无救，逐字节 skip 只会拖死会话。
@@ -1260,6 +1264,11 @@ int Proc_DTU_RecData(KFIFO_ID pData, WORD* pUsed, int type)
                     LOG(LOG_DEBUG,
                         "ota fw102 frame accepted pkt=%u body_len=%u frame_len=%u",
                         (unsigned)pkt, (unsigned)payloadLen, (unsigned)frameLen);
+                    /*
+                     * 写盘较慢：每处理一包 102 就回到 Socket recv，
+                     * 避免 for 循环连写多包期间不抽 TCP、内核/应用缓冲被塞满。
+                     */
+                    return SUCCESS;
                 } else if (!OtaUpgrade_IsBusy()) {
                     LOG(LOG_DEBUG, "ota downlink cmd=%u handled, body_len=%u",
                         u8Command, payloadLen);

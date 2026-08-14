@@ -15,9 +15,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SOCKET_RX_FIFO_SIZE  16384U
-#define SOCKET_RECV_BUF      2048
+/* 4G/公网 OTA：中心常窗口连发多包，16KB 约 7~8 帧即满，易在第 10 包前后丢字节卡死 */
+#define SOCKET_RX_FIFO_SIZE  (128U * 1024U)
+#define SOCKET_RECV_BUF      4096
 #define SOCKET_RECONNECT_SEC 3
+#define SOCKET_RCVBUF_BYTES  (256 * 1024)
 
 static int s_i32SockFd = -1;
 static pthread_mutex_t s_sockMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -83,6 +85,10 @@ static int socket_connect_once(void)
     }
 
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    {
+        int rcv = SOCKET_RCVBUF_BYTES;
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
+    }
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -220,7 +226,9 @@ static void* socket_thread(void* arg)
             }
 
             if (kfifo_put(s_rxFifo, recvBuf, (unsigned int)n) != (unsigned int)n) {
-                LOG(LOG_WARNING, "SocketLink: rx fifo full, drop %zd bytes", n);
+                LOG(LOG_WARNING,
+                    "SocketLink: rx fifo full, drop %zd bytes (queued=%u)",
+                    n, (unsigned)kfifo_len(s_rxFifo));
             }
             /* 分片 RAW 不打；拼好整帧后在 Command_proc [DOWNLINK] 打印 */
 
@@ -230,6 +238,14 @@ static void* socket_thread(void* arg)
     }
 
     return NULL;
+}
+
+unsigned int SocketLink_RxQueued(void)
+{
+    if (s_rxFifo == NULL) {
+        return 0U;
+    }
+    return kfifo_len(s_rxFifo);
 }
 
 void SocketLink_Start(void)

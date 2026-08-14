@@ -5,9 +5,13 @@ set -e
 BOARD_IP="${BOARD_IP:-192.168.101.230}"
 BOARD_USER="${BOARD_USER:-root}"
 BOARD_DIR="${BOARD_DIR:-/work/time-difference}"
-BIN="${BIN:-$HOME/work/GT6606_doppler/doppler_gt6606}"
-CONF="${CONF:-$HOME/work/GT6606_doppler/doppler.conf}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="${BIN:-$HOME/work/GT6606_doppler/doppler_gt6606}"
+# 优先用仓库源码里的 UTF-8 conf，避免板上被写坏的旧文件残留
+CONF="${CONF:-$SCRIPT_DIR/doppler/doppler.conf}"
+if [ ! -f "$CONF" ]; then
+  CONF="$HOME/work/GT6606_doppler/doppler.conf"
+fi
 
 if [ ! -f "$BIN" ]; then
   echo "ERROR: binary not found: $BIN"

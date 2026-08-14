@@ -17,5 +17,7 @@ void SocketLink_Start(void);
 int SocketLink_WaitConnected(uint32_t timeoutMs);
 int SocketLink_Send(const uint8_t* pData, int length);
 int SocketLink_IsConnected(void);
+/* 应用层 RX FIFO 已缓存字节数（OTA 心跳诊断用） */
+unsigned int SocketLink_RxQueued(void);
 
 #endif

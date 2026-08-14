@@ -8,6 +8,7 @@
 #include "ota_pkg.h"
 #include "FirmwareVersion.h"
 #include "Command_proc.h"
+#include "SocketLink.h"
 #include "WebSeriver.h"
 #include "log.h"
 #include "timer_manager.h"
@@ -153,10 +154,14 @@ int OtaUpgrade_Init(void)
     cfg.require_pkg = 1;
     cfg.product_id = OTA_PKG_PRODUCT_DPLR;
     /*
-     * 先写盘再 ACK：避免网页收到 ACK 后立刻再塞下一包 2KB，
-     * 与慢速 Flash fwrite 重叠导致 DTU RX FIFO 溢出/半包，进而“完整帧却不回 ACK”。
+     * DTU：先写盘再 ACK，避免网页立刻再塞包把串口 RX FIFO 打爆。
+     * Socket/4G：先 ACK 再写盘——蜂窝 RTT 大，若等 Flash 写完再 ACK，中心常直接停传
+     *（表现：网线正常、4G 卡在第 1～十余包后 1 分钟 abort）。应用 FIFO 已加大可吸后续包。
      */
-    cfg.fw102_ack_then_write = 0;
+    cfg.fw102_ack_then_write = WebLink_IsSocketMode() ? 1 : 0;
+    LOG(LOG_DEBUG, "ota ack_then_write=%d (%s)",
+        cfg.fw102_ack_then_write,
+        WebLink_IsSocketMode() ? "socket/4G" : "dtu");
     FirmwareVersion_Format(s_fwVer, sizeof(s_fwVer));
     cfg.fw_version = s_fwVer;
     cfg.cmd_fw102 = SERVER_FIRMWARE_UPDATE;
@@ -209,8 +214,14 @@ int OtaUpgrade_GetProgress(uint16_t *pkt_expect, uint16_t *pkt_total, uint32_t *
 
 int OtaUpgrade_KickIfStalled(uint32_t stall_ms)
 {
-    /* 约 4s 重发 lastOk；约 60s 仍无真实收包则放弃、解除 busy */
-    return ota_kick_if_stalled(stall_ms == 0U ? 4000U : stall_ms, 60000U);
+    uint32_t abort_ms = WebLink_IsSocketMode() ? 180000U : 60000U;
+    uint32_t use_stall = stall_ms;
+
+    /* Socket/4G：更勤重发 lastOk，促中心续传 */
+    if (use_stall == 0U) {
+        use_stall = WebLink_IsSocketMode() ? 2000U : 4000U;
+    }
+    return ota_kick_if_stalled(use_stall, abort_ms);
 }
 
 void OtaUpgrade_QueryUiStatus(ota_ui_status_t *out)

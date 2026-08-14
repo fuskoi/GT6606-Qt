@@ -1,11 +1,13 @@
-#include "doppler_mainwindow.h"
+﻿#include "doppler_mainwindow.h"
 #include "board_buzzer.h"
+#include "board_display.h"
 
 #include <QApplication>
 #include <QDateTime>
 #include <QEvent>
 #include <QFile>
 #include <QFont>
+#include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -16,10 +18,14 @@
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QSizePolicy>
 #include <QStackedWidget>
+#include <QStyle>
+#include <QTextCodec>
 #include <QTextCursor>
 #include <QTextEdit>
+#include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <cstring>
@@ -50,6 +56,128 @@ void setLabelTextIfChanged(QLabel *lab, const QString &text)
         return;
     lab->setText(text);
 }
+
+void setStatusChip(QLabel *lab, const QString &name, bool ok)
+{
+    if (lab == 0)
+        return;
+    const QString color = ok ? QStringLiteral("#1a7f37") : QStringLiteral("#b42318");
+    const QString html = QStringLiteral(
+        "<span style=\"color:%1;font-size:22px;\">●</span>&nbsp;%2")
+            .arg(color, name);
+    if (lab->text() == html)
+        return;
+    lab->setText(html);
+}
+
+void setOtaBadge(QLabel *lab, const QString &tone, const QString &text)
+{
+    if (lab == 0)
+        return;
+    setLabelTextIfChanged(lab, text);
+    if (lab->property("otaTone").toString() == tone)
+        return;
+    lab->setProperty("otaTone", tone);
+    QString bg = QStringLiteral("#64748b");
+    if (tone == QLatin1String("busy"))
+        bg = QStringLiteral("#0b7a7a");
+    else if (tone == QLatin1String("ok"))
+        bg = QStringLiteral("#1a7f37");
+    else if (tone == QLatin1String("fail"))
+        bg = QStringLiteral("#b42318");
+    lab->setStyleSheet(QStringLiteral(
+        "QLabel#otaBadge { color:#ffffff; background-color:%1; border-radius:8px;"
+        " padding:8px 18px; font-size:20px; font-weight:bold; }").arg(bg));
+}
+
+bool confTextHasCjk(const QString &text)
+{
+    for (int i = 0; i < text.size(); ++i) {
+        const uint u = text.at(i).unicode();
+        if (u >= 0x4E00U && u <= 0x9FFFU)
+            return true;
+    }
+    return false;
+}
+
+QString decodeConfBytes(const QByteArray &rawIn)
+{
+    QByteArray raw = rawIn;
+    if (raw.startsWith("\xEF\xBB\xBF"))
+        raw = raw.mid(3);
+
+    const QString utf8 = QString::fromUtf8(raw);
+    const int utf8Bad = utf8.count(QChar::ReplacementCharacter);
+    if (utf8Bad == 0 && (confTextHasCjk(utf8) || !raw.contains((char)0x80)))
+        return utf8;
+    /* 纯 ASCII / 无高位也可直接用 UTF-8 */
+    if (utf8Bad == 0)
+        return utf8;
+
+    QTextCodec *gb = QTextCodec::codecForName("GB18030");
+    if (gb == 0)
+        gb = QTextCodec::codecForName("GBK");
+    if (gb != 0) {
+        const QString gbk = gb->toUnicode(raw);
+        if (gbk.count(QChar::ReplacementCharacter) < utf8Bad || confTextHasCjk(gbk))
+            return gbk;
+    }
+
+    if (utf8Bad == 0)
+        return utf8;
+    return QString::fromLocal8Bit(raw);
+}
+
+void applyCjkUiFont(QWidget *w)
+{
+    if (w == 0)
+        return;
+    static QString s_family;
+    if (s_family.isEmpty()) {
+        const char *names[] = {
+            "WenQuanYi Micro Hei",
+            "WenQuanYi Zen Hei",
+            "Noto Sans CJK SC",
+            "Source Han Sans SC",
+            "Droid Sans Fallback",
+            "DroidSansFallback",
+            0
+        };
+        const QStringList families = QFontDatabase().families();
+        for (int i = 0; names[i] != 0; ++i) {
+            const QString n = QString::fromLatin1(names[i]);
+            if (families.contains(n)) {
+                s_family = n;
+                break;
+            }
+        }
+        if (s_family.isEmpty()) {
+            const char *paths[] = {
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                "/usr/share/fonts/DroidSansFallback.ttf",
+                0
+            };
+            for (int i = 0; paths[i] != 0; ++i) {
+                const int id = QFontDatabase::addApplicationFont(QString::fromLatin1(paths[i]));
+                if (id < 0)
+                    continue;
+                const QStringList faces = QFontDatabase::applicationFontFamilies(id);
+                if (!faces.isEmpty()) {
+                    s_family = faces.at(0);
+                    break;
+                }
+            }
+        }
+    }
+    if (s_family.isEmpty())
+        return;
+    QFont f = w->font();
+    f.setFamily(s_family);
+    w->setFont(f);
+}
 }
 
 DopplerMainWindow::DopplerMainWindow(QWidget *parent)
@@ -64,19 +192,35 @@ DopplerMainWindow::DopplerMainWindow(QWidget *parent)
     , m_pageWater(0)
     , m_pageOta(0)
     , m_pageDevLog(0)
-    , m_lblStatus(0)
+    , m_pageBlankSettings(0)
+    , m_pageExitAuth(0)
+    , m_blankCover(0)
+    , m_lblStatBiz(0)
+    , m_lblStatSensor(0)
+    , m_lblStatLink(0)
     , m_cfgActiveEdit(0)
+    , m_blankMinutes(5)
+    , m_screenBlanked(false)
     , m_bizOk(false)
     , m_otaWasBusy(false)
     , m_otaUiLocked(false)
 {
+    for (int i = 0; i < 5; ++i)
+        m_btnBlankMin[i] = 0;
     buildUi();
+    m_blankMinutes = loadBlankMinutesFromConf();
+    if (m_blankMinutes < 1 || m_blankMinutes > 5)
+        m_blankMinutes = 5;
+    refreshBlankMinuteButtons();
     m_uptime.start();
+    m_idleSince.start();
     m_timer = new QTimer(this);
     connect(m_timer, SIGNAL(timeout()), this, SLOT(onRefresh()));
     m_timer->start(1000);
+    qApp->installEventFilter(this);
     setBizEnabled(false);
     appendUiLog(QStringLiteral("界面已显示，正在启动业务…"));
+    appendUiLog(QStringLiteral("息屏时间：%1 分钟（菜单可改）").arg(m_blankMinutes));
 }
 
 DopplerMainWindow::~DopplerMainWindow()
@@ -148,9 +292,12 @@ void DopplerMainWindow::buildUi()
     m_root->setStyleSheet(QStringLiteral(
         "QWidget#root { background-color:#f3f6f8; color:#1a2330; }"
         "QFrame#topBar { background-color:#ffffff; border:none; border-bottom:3px solid #0b7a7a; }"
-        "QLabel#brand { color:#102033; font-size:28px; font-weight:bold; }"
-        "QLabel#clock { color:#334155; font-size:22px; font-weight:bold; }"
-        "QLabel#statusLine { color:#243447; font-size:18px; font-weight:bold; }"
+        "QLabel#brand { color:#102033; font-size:26px; font-weight:bold; }"
+        "QLabel#clock { color:#334155; font-size:20px; font-weight:bold; }"
+        "QLabel#statusChip {"
+        "  color:#243447; font-size:18px; font-weight:bold;"
+        "  padding:2px 4px;"
+        "}"
         "QLabel#metaText { color:#243447; font-size:20px; font-weight:bold; }"
         "QFrame#metricTile { background-color:#ffffff; border:2px solid #c9d4df; border-radius:10px; }"
         "QLabel#metricCap { color:#3b4d61; font-size:18px; font-weight:bold; }"
@@ -159,19 +306,25 @@ void DopplerMainWindow::buildUi()
         "QLabel#hintText { color:#3b4d61; font-size:16px; }"
         "QPushButton {"
         "  background-color:#0b7a7a; color:#ffffff; border:none; border-radius:8px;"
-        "  padding:12px 16px; font-size:20px; font-weight:bold; min-height:60px;"
+        "  padding:10px 14px; font-size:20px; font-weight:bold; min-height:52px;"
         "}"
         "QPushButton:pressed { background-color:#096666; }"
         "QPushButton:disabled { background-color:#b7c2cc; color:#5b6b7a; }"
-        "QPushButton#secondaryBtn { background-color:#1d4f7a; }"
-        "QPushButton#secondaryBtn:pressed { background-color:#163d5e; }"
+        /* 选中态（息屏分钟等）：同色加深描边，避免菜单里蓝/青混排 */
+        "QPushButton#selectedBtn {"
+        "  background-color:#086363; border:3px solid #0a2f2f;"
+        "}"
+        "QPushButton#selectedBtn:pressed { background-color:#064949; }"
         "QPushButton#dangerBtn { background-color:#b42318; }"
         "QPushButton#dangerBtn:pressed { background-color:#912018; }"
         "QPushButton#exitBtn { background-color:#b42318; min-width:100px; min-height:48px;"
         "  padding:8px 16px; font-size:18px; }"
         "QPushButton#exitBtn:pressed { background-color:#912018; }"
-        "QPushButton#backBtn { background-color:#334155; min-width:140px; }"
+        "QPushButton#backBtn { background-color:#475569; min-width:140px; }"
+        "QPushButton#backBtn:pressed { background-color:#334155; }"
         "QPushButton#cfgPadBtn { min-height:32px; max-height:42px; padding:4px 6px; font-size:16px; }"
+        "QPushButton#padActionBtn { background-color:#475569; }"
+        "QPushButton#padActionBtn:pressed { background-color:#334155; }"
         "QLabel#cfgFieldLab { color:#3b4d61; font-size:18px; font-weight:bold; }"
         "QLineEdit {"
         "  background:#ffffff; border:2px solid #c9d4df; border-radius:6px;"
@@ -188,6 +341,37 @@ void DopplerMainWindow::buildUi()
         "  background-color:#ffffff; color:#102033; border:2px solid #c9d4df;"
         "  border-radius:8px; font-size:18px; padding:10px;"
         "}"
+        /* OTA 全屏页：与首页同一套青绿工业风，信息层次更清晰 */
+        "QWidget#otaPage { background-color:#e8eef2; }"
+        "QFrame#otaTopBar { background-color:#ffffff; border:none; border-bottom:3px solid #0b7a7a; }"
+        "QLabel#otaBrand { color:#102033; font-size:26px; font-weight:bold; }"
+        "QFrame#otaHero {"
+        "  background-color:#ffffff; border:2px solid #c9d4df; border-radius:14px;"
+        "}"
+        "QLabel#otaPercent { color:#0b7a7a; font-size:92px; font-weight:bold; }"
+        "QLabel#otaState { color:#102033; font-size:28px; font-weight:bold; }"
+        "QLabel#otaBadge {"
+        "  color:#ffffff; background-color:#0b7a7a; border-radius:8px;"
+        "  padding:8px 18px; font-size:20px; font-weight:bold;"
+        "}"
+        "QLabel#otaBadge[otaTone=\"busy\"] { background-color:#0b7a7a; }"
+        "QLabel#otaBadge[otaTone=\"ok\"] { background-color:#1a7f37; }"
+        "QLabel#otaBadge[otaTone=\"fail\"] { background-color:#b42318; }"
+        "QLabel#otaBadge[otaTone=\"idle\"] { background-color:#64748b; }"
+        "QProgressBar#otaBar {"
+        "  border:2px solid #9db0c0; border-radius:12px; background:#dce5ec;"
+        "  text-align:center; color:#102033; font-size:18px; font-weight:bold;"
+        "  min-height:28px;"
+        "}"
+        "QProgressBar#otaBar::chunk {"
+        "  background-color:#0b7a7a; border-radius:10px; margin:2px;"
+        "}"
+        "QFrame#otaDetailCard {"
+        "  background-color:#ffffff; border:2px solid #c9d4df; border-radius:12px;"
+        "}"
+        "QLabel#otaDetail {"
+        "  color:#243447; font-size:20px; font-weight:bold; line-height:28px;"
+        "}"
     ));
 
     m_stack = new QStackedWidget(m_root);
@@ -196,21 +380,36 @@ void DopplerMainWindow::buildUi()
     m_pageHome = new QWidget(m_stack);
     QFrame *topBar = new QFrame(m_pageHome);
     topBar->setObjectName(QStringLiteral("topBar"));
+    topBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_title = new QLabel(QStringLiteral("时差法 流量监测"), topBar);
     m_title->setObjectName(QStringLiteral("brand"));
+
+    m_lblStatBiz = new QLabel(topBar);
+    m_lblStatBiz->setObjectName(QStringLiteral("statusChip"));
+    m_lblStatBiz->setTextFormat(Qt::RichText);
+    m_lblStatSensor = new QLabel(topBar);
+    m_lblStatSensor->setObjectName(QStringLiteral("statusChip"));
+    m_lblStatSensor->setTextFormat(Qt::RichText);
+    m_lblStatLink = new QLabel(topBar);
+    m_lblStatLink->setObjectName(QStringLiteral("statusChip"));
+    m_lblStatLink->setTextFormat(Qt::RichText);
+    setStatusChip(m_lblStatBiz, QStringLiteral("业务"), false);
+    setStatusChip(m_lblStatSensor, QStringLiteral("传感器"), false);
+    setStatusChip(m_lblStatLink, QStringLiteral("4G"), false);
+
     m_lblClock = new QLabel(topBar);
     m_lblClock->setObjectName(QStringLiteral("clock"));
 
     QHBoxLayout *topLay = new QHBoxLayout(topBar);
-    topLay->setContentsMargins(16, 12, 16, 12);
-    topLay->setSpacing(12);
-    topLay->addWidget(m_title);
+    topLay->setContentsMargins(16, 10, 16, 10);
+    topLay->setSpacing(10);
+    topLay->addWidget(m_title, 0);
+    topLay->addSpacing(8);
+    topLay->addWidget(m_lblStatBiz, 0);
+    topLay->addWidget(m_lblStatSensor, 0);
+    topLay->addWidget(m_lblStatLink, 0);
     topLay->addStretch(1);
-    topLay->addWidget(m_lblClock);
-
-    m_lblStatus = new QLabel(QStringLiteral("状态：启动中…"), m_pageHome);
-    m_lblStatus->setObjectName(QStringLiteral("statusLine"));
-    m_lblStatus->setWordWrap(true);
+    topLay->addWidget(m_lblClock, 0);
 
     QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1\n(m/s)"), &m_valVel1);
     QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2\n(m/s)"), &m_valVel2);
@@ -236,28 +435,32 @@ void DopplerMainWindow::buildUi()
     grid->setColumnStretch(2, 1);
 
     m_btnFunc = new QPushButton(QStringLiteral("菜单"), m_pageHome);
-    m_btnFunc->setObjectName(QStringLiteral("secondaryBtn"));
-    m_btnLog = new QPushButton(QStringLiteral("屏显日志"), m_pageHome);
-    m_btnLog->setObjectName(QStringLiteral("secondaryBtn"));
+    m_btnOpenWater = new QPushButton(QStringLiteral("设置水位加测"), m_pageHome);
+    m_btnFunc->setMinimumHeight(56);
+    m_btnOpenWater->setMinimumHeight(56);
+    m_btnFunc->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_btnOpenWater->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(m_btnFunc, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
-    connect(m_btnLog, SIGNAL(clicked()), this, SLOT(onShowLogPage()));
+    connect(m_btnOpenWater, SIGNAL(clicked()), this, SLOT(onShowWaterPage()));
 
-    QHBoxLayout *btnLay = new QHBoxLayout;
+    QWidget *homeBtnBar = new QWidget(m_pageHome);
+    homeBtnBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    homeBtnBar->setMinimumHeight(64);
+    QHBoxLayout *btnLay = new QHBoxLayout(homeBtnBar);
     btnLay->setSpacing(12);
     btnLay->setContentsMargins(0, 4, 0, 0);
     btnLay->addWidget(m_btnFunc, 1);
-    btnLay->addWidget(m_btnLog, 1);
+    btnLay->addWidget(m_btnOpenWater, 1);
 
     QVBoxLayout *homeLay = new QVBoxLayout(m_pageHome);
     homeLay->setContentsMargins(0, 0, 0, 0);
     homeLay->setSpacing(0);
-    homeLay->addWidget(topBar);
+    homeLay->addWidget(topBar, 0);
     QVBoxLayout *body = new QVBoxLayout;
-    body->setContentsMargins(18, 16, 18, 16);
-    body->setSpacing(14);
-    body->addWidget(m_lblStatus, 0);
+    body->setContentsMargins(18, 12, 18, 12);
+    body->setSpacing(10);
     body->addLayout(grid, 1);
-    body->addLayout(btnLay, 0);
+    body->addWidget(homeBtnBar, 0);
     homeLay->addLayout(body, 1);
 
     /* ---------- Log page ---------- */
@@ -266,7 +469,7 @@ void DopplerMainWindow::buildUi()
     logTitle->setObjectName(QStringLiteral("pageTitle"));
     m_btnBackLog = new QPushButton(QStringLiteral("返回"), m_pageLog);
     m_btnBackLog->setObjectName(QStringLiteral("backBtn"));
-    connect(m_btnBackLog, SIGNAL(clicked()), this, SLOT(onBackHome()));
+    connect(m_btnBackLog, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
     QHBoxLayout *logTop = new QHBoxLayout;
     logTop->addWidget(logTitle);
     logTop->addStretch(1);
@@ -294,11 +497,10 @@ void DopplerMainWindow::buildUi()
     m_btnStartTest = new QPushButton(QStringLiteral("加测（采一轮并上报）"), m_pageFunc);
     m_btnFuncCollect = new QPushButton(QStringLiteral("手动采集"), m_pageFunc);
     m_btnFuncReport = new QPushButton(QStringLiteral("手动上报"), m_pageFunc);
-    m_btnOpenWater = new QPushButton(QStringLiteral("设置水位后测流"), m_pageFunc);
+    m_btnLog = new QPushButton(QStringLiteral("屏显日志"), m_pageFunc);
     m_btnViewConfig = new QPushButton(QStringLiteral("查看配置"), m_pageFunc);
-    m_btnViewConfig->setObjectName(QStringLiteral("secondaryBtn"));
     m_btnDevLogPage = new QPushButton(QStringLiteral("设备完整日志"), m_pageFunc);
-    m_btnDevLogPage->setObjectName(QStringLiteral("secondaryBtn"));
+    m_btnBlankSettings = new QPushButton(QStringLiteral("息屏设置"), m_pageFunc);
     m_btnReboot = new QPushButton(QStringLiteral("重启设备"), m_pageFunc);
     m_btnReboot->setObjectName(QStringLiteral("dangerBtn"));
     m_btnExit = new QPushButton(QStringLiteral("退出程序"), m_pageFunc);
@@ -306,9 +508,10 @@ void DopplerMainWindow::buildUi()
     connect(m_btnStartTest, SIGNAL(clicked()), this, SLOT(onStartTest()));
     connect(m_btnFuncCollect, SIGNAL(clicked()), this, SLOT(onCollect()));
     connect(m_btnFuncReport, SIGNAL(clicked()), this, SLOT(onReport()));
-    connect(m_btnOpenWater, SIGNAL(clicked()), this, SLOT(onShowWaterPage()));
+    connect(m_btnLog, SIGNAL(clicked()), this, SLOT(onShowLogPage()));
     connect(m_btnViewConfig, SIGNAL(clicked()), this, SLOT(onShowConfigPage()));
     connect(m_btnDevLogPage, SIGNAL(clicked()), this, SLOT(onShowDeviceLogPage()));
+    connect(m_btnBlankSettings, SIGNAL(clicked()), this, SLOT(onShowBlankSettingsPage()));
     connect(m_btnReboot, SIGNAL(clicked()), this, SLOT(onRebootDevice()));
     connect(m_btnExit, SIGNAL(clicked()), this, SLOT(onExit()));
 
@@ -318,11 +521,12 @@ void DopplerMainWindow::buildUi()
     funcGrid->addWidget(m_btnFuncCollect, 0, 0);
     funcGrid->addWidget(m_btnFuncReport, 0, 1);
     funcGrid->addWidget(m_btnStartTest, 1, 0);
-    funcGrid->addWidget(m_btnOpenWater, 1, 1);
+    funcGrid->addWidget(m_btnLog, 1, 1);
     funcGrid->addWidget(m_btnViewConfig, 2, 0);
     funcGrid->addWidget(m_btnDevLogPage, 2, 1);
-    funcGrid->addWidget(m_btnReboot, 3, 0);
-    funcGrid->addWidget(m_btnExit, 3, 1);
+    funcGrid->addWidget(m_btnBlankSettings, 3, 0);
+    funcGrid->addWidget(m_btnReboot, 3, 1);
+    funcGrid->addWidget(m_btnExit, 4, 0, 1, 2);
 
     QVBoxLayout *funcLay = new QVBoxLayout(m_pageFunc);
     funcLay->setContentsMargins(16, 14, 16, 14);
@@ -343,20 +547,20 @@ void DopplerMainWindow::buildUi()
     waterTitle->setObjectName(QStringLiteral("pageTitle"));
     m_btnBackWater = new QPushButton(QStringLiteral("返回"), m_pageWater);
     m_btnBackWater->setObjectName(QStringLiteral("backBtn"));
-    connect(m_btnBackWater, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
+    connect(m_btnBackWater, SIGNAL(clicked()), this, SLOT(onBackHome()));
     QHBoxLayout *waterTop = new QHBoxLayout;
     waterTop->addWidget(waterTitle);
     waterTop->addStretch(1);
     waterTop->addWidget(m_btnBackWater);
 
     QLabel *waterHint = new QLabel(
-        QStringLiteral("输入水位（厘米），点数字键盘，无需外接键盘"), m_pageWater);
+        QStringLiteral("输入水位（厘米），不输入水位直接点加测用原水位数据"), m_pageWater);
     waterHint->setObjectName(QStringLiteral("hintText"));
     waterHint->setWordWrap(true);
     m_editWaterCm = new QLineEdit(m_pageWater);
-    m_editWaterCm->setPlaceholderText(QStringLiteral("例如 150"));
+    m_editWaterCm->setPlaceholderText(QStringLiteral("例如 1500"));
     m_editWaterCm->setReadOnly(true);
-    m_btnApplyWater = new QPushButton(QStringLiteral("应用并上报"), m_pageWater);
+    m_btnApplyWater = new QPushButton(QStringLiteral("加测"), m_pageWater);
     connect(m_btnApplyWater, SIGNAL(clicked()), this, SLOT(onApplyWaterCm()));
     QHBoxLayout *waterLay = new QHBoxLayout;
     waterLay->addWidget(m_editWaterCm, 1);
@@ -378,8 +582,10 @@ void DopplerMainWindow::buildUi()
         kb->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         kb->setMinimumHeight(44);
         if (i == 9) {
+            kb->setObjectName(QStringLiteral("padActionBtn"));
             connect(kb, SIGNAL(clicked()), this, SLOT(onNumPadClear()));
         } else if (i == 11) {
+            kb->setObjectName(QStringLiteral("padActionBtn"));
             connect(kb, SIGNAL(clicked()), this, SLOT(onNumPadBackspace()));
         } else {
             connect(kb, SIGNAL(clicked()), this, SLOT(onNumPadDigit()));
@@ -421,6 +627,7 @@ void DopplerMainWindow::buildUi()
     m_cfgView = new QTextEdit(m_pageConfig);
     m_cfgView->setObjectName(QStringLiteral("cfgView"));
     m_cfgView->setReadOnly(true);
+    applyCjkUiFont(m_cfgView);
     QVBoxLayout *cfgLay = new QVBoxLayout(m_pageConfig);
     cfgLay->setContentsMargins(16, 14, 16, 14);
     cfgLay->setSpacing(8);
@@ -508,46 +715,82 @@ void DopplerMainWindow::buildUi()
 
     /* ---------- OTA status page ---------- */
     m_pageOta = new QWidget(m_stack);
-    QLabel *otaTitle = new QLabel(QStringLiteral("升级进度 / 结果"), m_pageOta);
-    otaTitle->setObjectName(QStringLiteral("pageTitle"));
-    m_btnBackOta = new QPushButton(QStringLiteral("返回"), m_pageOta);
+    m_pageOta->setObjectName(QStringLiteral("otaPage"));
+
+    QFrame *otaTopBar = new QFrame(m_pageOta);
+    otaTopBar->setObjectName(QStringLiteral("otaTopBar"));
+    QLabel *otaBrand = new QLabel(QStringLiteral("固件升级"), otaTopBar);
+    otaBrand->setObjectName(QStringLiteral("otaBrand"));
+    m_btnBackOta = new QPushButton(QStringLiteral("返回首页"), otaTopBar);
     m_btnBackOta->setObjectName(QStringLiteral("backBtn"));
     connect(m_btnBackOta, SIGNAL(clicked()), this, SLOT(onBackHome()));
     /* 升级中隐藏返回，结束后失败才允许离开 */
     m_btnBackOta->setVisible(false);
-    QHBoxLayout *otaTop = new QHBoxLayout;
-    otaTop->addWidget(otaTitle);
+    QHBoxLayout *otaTop = new QHBoxLayout(otaTopBar);
+    otaTop->setContentsMargins(18, 12, 18, 12);
+    otaTop->setSpacing(12);
+    otaTop->addWidget(otaBrand);
     otaTop->addStretch(1);
     otaTop->addWidget(m_btnBackOta);
-    m_lblOtaState = new QLabel(QStringLiteral("状态：空闲"), m_pageOta);
-    m_lblOtaState->setObjectName(QStringLiteral("pageTitle"));
+
+    m_otaHero = new QFrame(m_pageOta);
+    m_otaHero->setObjectName(QStringLiteral("otaHero"));
+    m_lblOtaPercent = new QLabel(QStringLiteral("0%"), m_otaHero);
+    m_lblOtaPercent->setObjectName(QStringLiteral("otaPercent"));
+    m_lblOtaPercent->setAlignment(Qt::AlignCenter);
+    m_lblOtaState = new QLabel(QStringLiteral("等待升级"), m_otaHero);
+    m_lblOtaState->setObjectName(QStringLiteral("otaState"));
+    m_lblOtaState->setAlignment(Qt::AlignCenter);
     m_lblOtaState->setWordWrap(true);
-    m_otaProgress = new QProgressBar(m_pageOta);
+    m_lblOtaBadge = new QLabel(QStringLiteral("空闲"), m_otaHero);
+    m_lblOtaBadge->setObjectName(QStringLiteral("otaBadge"));
+    m_lblOtaBadge->setAlignment(Qt::AlignCenter);
+    m_lblOtaBadge->setProperty("otaTone", QStringLiteral("idle"));
+    m_lblOtaBadge->setMinimumWidth(160);
+    m_lblOtaBadge->setStyleSheet(QStringLiteral(
+        "QLabel#otaBadge { color:#ffffff; background-color:#64748b; border-radius:8px;"
+        " padding:8px 18px; font-size:20px; font-weight:bold; }"));
+    m_otaProgress = new QProgressBar(m_otaHero);
+    m_otaProgress->setObjectName(QStringLiteral("otaBar"));
     m_otaProgress->setRange(0, 100);
     m_otaProgress->setValue(0);
     m_otaProgress->setTextVisible(true);
+    m_otaProgress->setFormat(QStringLiteral("%p%"));
     m_otaProgress->setMinimumHeight(36);
-    m_lblOtaDetail = new QLabel(QStringLiteral("等待网页下发固件…"), m_pageOta);
-    m_lblOtaDetail->setObjectName(QStringLiteral("hintText"));
+    QHBoxLayout *badgeRow = new QHBoxLayout;
+    badgeRow->addStretch(1);
+    badgeRow->addWidget(m_lblOtaBadge);
+    badgeRow->addStretch(1);
+    QVBoxLayout *heroLay = new QVBoxLayout(m_otaHero);
+    heroLay->setContentsMargins(24, 18, 24, 20);
+    heroLay->setSpacing(10);
+    heroLay->addWidget(m_lblOtaPercent);
+    heroLay->addWidget(m_lblOtaState);
+    heroLay->addLayout(badgeRow);
+    heroLay->addSpacing(4);
+    heroLay->addWidget(m_otaProgress);
+
+    m_otaDetailCard = new QFrame(m_pageOta);
+    m_otaDetailCard->setObjectName(QStringLiteral("otaDetailCard"));
+    m_lblOtaDetail = new QLabel(QStringLiteral("等待网页下发固件…"), m_otaDetailCard);
+    m_lblOtaDetail->setObjectName(QStringLiteral("otaDetail"));
     m_lblOtaDetail->setWordWrap(true);
-    m_lblOtaResult = new QLabel(QStringLiteral("最近结果：尚无"), m_pageOta);
-    m_lblOtaResult->setObjectName(QStringLiteral("metaText"));
-    m_lblOtaResult->setWordWrap(true);
-    QLabel *otaHint = new QLabel(
-        QStringLiteral("固件由网页下发。升级时自动全屏并锁定操作，请勿断电；成功后将重启。"),
-        m_pageOta);
-    otaHint->setObjectName(QStringLiteral("hintText"));
-    otaHint->setWordWrap(true);
+    m_lblOtaDetail->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    QVBoxLayout *detailLay = new QVBoxLayout(m_otaDetailCard);
+    detailLay->setContentsMargins(18, 14, 18, 14);
+    detailLay->addWidget(m_lblOtaDetail);
+
+    QVBoxLayout *otaBody = new QVBoxLayout;
+    otaBody->setContentsMargins(20, 16, 20, 16);
+    otaBody->setSpacing(14);
+    otaBody->addWidget(m_otaHero, 0);
+    otaBody->addWidget(m_otaDetailCard, 1);
+
     QVBoxLayout *otaLay = new QVBoxLayout(m_pageOta);
-    otaLay->setContentsMargins(16, 14, 16, 14);
-    otaLay->setSpacing(12);
-    otaLay->addLayout(otaTop);
-    otaLay->addWidget(m_lblOtaState);
-    otaLay->addWidget(m_otaProgress);
-    otaLay->addWidget(m_lblOtaDetail);
-    otaLay->addWidget(m_lblOtaResult);
-    otaLay->addStretch(1);
-    otaLay->addWidget(otaHint);
+    otaLay->setContentsMargins(0, 0, 0, 0);
+    otaLay->setSpacing(0);
+    otaLay->addWidget(otaTopBar, 0);
+    otaLay->addLayout(otaBody, 1);
 
     /* ---------- Device log page (log.lg) ---------- */
     m_pageDevLog = new QWidget(m_stack);
@@ -562,7 +805,6 @@ void DopplerMainWindow::buildUi()
     devLogTop->addWidget(m_btnBackDevLog);
     m_btnDevLogAll = new QPushButton(QStringLiteral("全部"), m_pageDevLog);
     m_btnDevLogWarn = new QPushButton(QStringLiteral("警告+错误"), m_pageDevLog);
-    m_btnDevLogWarn->setObjectName(QStringLiteral("secondaryBtn"));
     m_btnDevLogError = new QPushButton(QStringLiteral("仅错误"), m_pageDevLog);
     m_btnDevLogError->setObjectName(QStringLiteral("dangerBtn"));
     connect(m_btnDevLogAll, SIGNAL(clicked()), this, SLOT(onLoadDeviceLogAll()));
@@ -586,6 +828,108 @@ void DopplerMainWindow::buildUi()
     devLogLay->addWidget(m_lblDevLogMeta);
     devLogLay->addWidget(m_devLog, 1);
 
+    /* ---------- Blank timeout settings ---------- */
+    m_pageBlankSettings = new QWidget(m_stack);
+    QLabel *blankTitle = new QLabel(QStringLiteral("息屏设置"), m_pageBlankSettings);
+    blankTitle->setObjectName(QStringLiteral("pageTitle"));
+    m_btnBackBlank = new QPushButton(QStringLiteral("返回"), m_pageBlankSettings);
+    m_btnBackBlank->setObjectName(QStringLiteral("backBtn"));
+    connect(m_btnBackBlank, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
+    QHBoxLayout *blankTop = new QHBoxLayout;
+    blankTop->addWidget(blankTitle);
+    blankTop->addStretch(1);
+    blankTop->addWidget(m_btnBackBlank);
+    m_lblBlankHint = new QLabel(
+        QStringLiteral("无操作达到设定时间后自动息屏；点按屏幕任意处亮屏。升级进行中不会息屏。"),
+        m_pageBlankSettings);
+    m_lblBlankHint->setObjectName(QStringLiteral("hintText"));
+    m_lblBlankHint->setWordWrap(true);
+
+    QGridLayout *blankGrid = new QGridLayout;
+    blankGrid->setHorizontalSpacing(12);
+    blankGrid->setVerticalSpacing(12);
+    for (int i = 0; i < 5; ++i) {
+        m_btnBlankMin[i] = new QPushButton(
+            QStringLiteral("%1 分钟").arg(i + 1), m_pageBlankSettings);
+        m_btnBlankMin[i]->setProperty("blankMin", i + 1);
+        connect(m_btnBlankMin[i], SIGNAL(clicked()), this, SLOT(onBlankMinutesChosen()));
+        blankGrid->addWidget(m_btnBlankMin[i], i / 3, i % 3);
+    }
+
+    QVBoxLayout *blankLay = new QVBoxLayout(m_pageBlankSettings);
+    blankLay->setContentsMargins(16, 14, 16, 14);
+    blankLay->setSpacing(12);
+    blankLay->addLayout(blankTop);
+    blankLay->addWidget(m_lblBlankHint);
+    blankLay->addLayout(blankGrid);
+    blankLay->addStretch(1);
+
+    /* ---------- Exit password ---------- */
+    m_pageExitAuth = new QWidget(m_stack);
+    QLabel *exitTitle = new QLabel(QStringLiteral("退出程序"), m_pageExitAuth);
+    exitTitle->setObjectName(QStringLiteral("pageTitle"));
+    m_btnBackExitAuth = new QPushButton(QStringLiteral("取消"), m_pageExitAuth);
+    m_btnBackExitAuth->setObjectName(QStringLiteral("backBtn"));
+    connect(m_btnBackExitAuth, SIGNAL(clicked()), this, SLOT(onShowFuncPage()));
+    QHBoxLayout *exitTop = new QHBoxLayout;
+    exitTop->addWidget(exitTitle);
+    exitTop->addStretch(1);
+    exitTop->addWidget(m_btnBackExitAuth);
+
+    m_lblExitPwdHint = new QLabel(
+        QStringLiteral("请输入退出密码（默认 111111）"), m_pageExitAuth);
+    m_lblExitPwdHint->setObjectName(QStringLiteral("hintText"));
+    m_lblExitPwdHint->setWordWrap(true);
+    m_editExitPwd = new QLineEdit(m_pageExitAuth);
+    m_editExitPwd->setEchoMode(QLineEdit::Password);
+    m_editExitPwd->setReadOnly(true);
+    m_editExitPwd->setAlignment(Qt::AlignCenter);
+    m_editExitPwd->setPlaceholderText(QStringLiteral("请输入密码"));
+    m_editExitPwd->setMinimumHeight(48);
+    m_btnExitConfirm = new QPushButton(QStringLiteral("确认退出"), m_pageExitAuth);
+    m_btnExitConfirm->setObjectName(QStringLiteral("dangerBtn"));
+    connect(m_btnExitConfirm, SIGNAL(clicked()), this, SLOT(onExitConfirm()));
+
+    QWidget *exitPadHost = new QWidget(m_pageExitAuth);
+    QGridLayout *exitPad = new QGridLayout(exitPadHost);
+    exitPad->setContentsMargins(0, 0, 0, 0);
+    exitPad->setHorizontalSpacing(10);
+    exitPad->setVerticalSpacing(10);
+    const char *exitKeys[12] = {
+        "1", "2", "3",
+        "4", "5", "6",
+        "7", "8", "9",
+        "清除", "0", "删除"
+    };
+    for (int i = 0; i < 12; ++i) {
+        QPushButton *kb = new QPushButton(QString::fromUtf8(exitKeys[i]), exitPadHost);
+        kb->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        kb->setMinimumHeight(44);
+        if (i == 9) {
+            kb->setObjectName(QStringLiteral("padActionBtn"));
+            connect(kb, SIGNAL(clicked()), this, SLOT(onExitPwdClear()));
+        } else if (i == 11) {
+            kb->setObjectName(QStringLiteral("padActionBtn"));
+            connect(kb, SIGNAL(clicked()), this, SLOT(onExitPwdBackspace()));
+        } else {
+            connect(kb, SIGNAL(clicked()), this, SLOT(onExitPwdDigit()));
+        }
+        exitPad->addWidget(kb, i / 3, i % 3);
+    }
+    for (int r = 0; r < 4; ++r)
+        exitPad->setRowStretch(r, 1);
+    for (int c = 0; c < 3; ++c)
+        exitPad->setColumnStretch(c, 1);
+
+    QVBoxLayout *exitLay = new QVBoxLayout(m_pageExitAuth);
+    exitLay->setContentsMargins(16, 14, 16, 14);
+    exitLay->setSpacing(10);
+    exitLay->addLayout(exitTop);
+    exitLay->addWidget(m_lblExitPwdHint);
+    exitLay->addWidget(m_editExitPwd);
+    exitLay->addWidget(m_btnExitConfirm);
+    exitLay->addWidget(exitPadHost, 1);
+
     m_stack->addWidget(m_pageHome);        /* 0 */
     m_stack->addWidget(m_pageLog);         /* 1 */
     m_stack->addWidget(m_pageFunc);        /* 2 */
@@ -594,6 +938,14 @@ void DopplerMainWindow::buildUi()
     m_stack->addWidget(m_pageOta);         /* 5 */
     m_stack->addWidget(m_pageDevLog);      /* 6 */
     m_stack->addWidget(m_pageConfigEdit);  /* 7 */
+    m_stack->addWidget(m_pageBlankSettings); /* 8 */
+    m_stack->addWidget(m_pageExitAuth);    /* 9 */
+
+    for (int i = 0; i < m_stack->count(); ++i) {
+        QWidget *page = m_stack->widget(i);
+        if (page)
+            page->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    }
 
     /* Touch UI: no keyboard focus ring (dashed rect) after button press. */
     const QList<QPushButton *> buttons = findChildren<QPushButton *>();
@@ -602,7 +954,19 @@ void DopplerMainWindow::buildUi()
 
     QVBoxLayout *rootLay = new QVBoxLayout(m_root);
     rootLay->setContentsMargins(0, 0, 0, 0);
+    rootLay->setSpacing(0);
     rootLay->addWidget(m_stack);
+    m_root->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_stack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    /* 遮罩挂在主窗口上，不要做 m_root 布局的子控件，否则会撑破 600 屏高 */
+    m_blankCover = new QWidget(this);
+    m_blankCover->setObjectName(QStringLiteral("blankCover"));
+    m_blankCover->setStyleSheet(QStringLiteral(
+        "QWidget#blankCover { background-color:#000000; }"));
+    m_blankCover->hide();
+    m_blankCover->installEventFilter(this);
+    m_blankCover->setGeometry(0, 0, BOARD_WIDTH, BOARD_HEIGHT);
 }
 
 void DopplerMainWindow::setBizEnabled(bool on)
@@ -663,12 +1027,15 @@ void DopplerMainWindow::setOtaUiLocked(bool locked)
     m_btnFuncCollect->setEnabled(!locked && m_bizOk);
     m_btnFuncReport->setEnabled(!locked && m_bizOk);
     m_btnLog->setEnabled(!locked);
+    m_btnOpenWater->setEnabled(!locked && m_bizOk);
     m_btnFunc->setEnabled(!locked);
+    m_btnBlankSettings->setEnabled(!locked);
     m_btnExit->setEnabled(!locked);
     m_btnBackOta->setVisible(!locked);
     m_btnBackOta->setEnabled(!locked);
 
     if (locked) {
+        wakeScreen();
         m_stack->setCurrentWidget(m_pageOta);
         appendUiLog(QStringLiteral("OTA 进行中，界面已锁定"));
     }
@@ -735,10 +1102,12 @@ void DopplerMainWindow::updateOtaUi()
     FirmwareVersion_Format(fw, sizeof(fw));
 
     if (!st.inited) {
-        m_lblOtaState->setText(QStringLiteral("状态：OTA 未初始化"));
+        setLabelTextIfChanged(m_lblOtaState, QStringLiteral("OTA 未初始化"));
+        setLabelTextIfChanged(m_lblOtaPercent, QStringLiteral("--"));
+        setOtaBadge(m_lblOtaBadge, QStringLiteral("idle"), QStringLiteral("不可用"));
         m_otaProgress->setValue(0);
-        m_lblOtaDetail->setText(QStringLiteral("当前固件版本：%1").arg(QString::fromLatin1(fw)));
-        m_lblOtaResult->setText(QStringLiteral("最近结果：尚无"));
+        setLabelTextIfChanged(m_lblOtaDetail,
+                              QStringLiteral("当前固件版本：%1").arg(QString::fromLatin1(fw)));
         setOtaUiLocked(false);
         return;
     }
@@ -748,6 +1117,9 @@ void DopplerMainWindow::updateOtaUi()
             || st.status == OTA_STATUS_RECEIVING
             || st.status == OTA_STATUS_APPLYING
             || st.status == OTA_STATUS_OK;
+    const bool failed = !blocking && st.have_last_result && !st.last_ok;
+    const bool success = blocking &&
+            (st.reboot_pending || st.status == OTA_STATUS_OK);
 
     if (blocking) {
         if (!m_otaWasBusy) {
@@ -757,25 +1129,38 @@ void DopplerMainWindow::updateOtaUi()
         setOtaUiLocked(true);
         if (m_stack->currentWidget() != m_pageOta)
             m_stack->setCurrentWidget(m_pageOta);
-        m_lblOtaState->setText(QStringLiteral("状态：进行中 · %1").arg(otaStatusText(st.status)));
+        if (success) {
+            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级成功，即将重启"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("ok"), QStringLiteral("成功"));
+        } else {
+            setLabelTextIfChanged(m_lblOtaState,
+                                  QStringLiteral("正在升级 · %1").arg(otaStatusText(st.status)));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("busy"), QStringLiteral("进行中"));
+        }
     } else {
         if (m_otaWasBusy) {
             appendUiLog(QStringLiteral("OTA 会话结束"));
             m_otaWasBusy = false;
-            /* 失败结束：解锁并显示返回，便于回到首页 */
             setOtaUiLocked(false);
             if (m_stack->currentWidget() == m_pageOta)
                 m_btnBackOta->setVisible(true);
         }
-        m_lblOtaState->setText(QStringLiteral("状态：%1").arg(otaStatusText(st.status)));
+        if (failed) {
+            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级失败"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("fail"), QStringLiteral("失败"));
+        } else {
+            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("等待网页下发固件"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("idle"), QStringLiteral("空闲"));
+        }
     }
 
     int pct = 0;
+    unsigned donePkt = 0;
     if (st.pkt_total > 0) {
-        unsigned done = (st.pkt_expect > 0) ? (unsigned)(st.pkt_expect - 1U) : 0U;
-        if (done > st.pkt_total)
-            done = st.pkt_total;
-        pct = (int)((done * 100U) / st.pkt_total);
+        donePkt = (st.pkt_expect > 0) ? (unsigned)(st.pkt_expect - 1U) : 0U;
+        if (donePkt > st.pkt_total)
+            donePkt = st.pkt_total;
+        pct = (int)((donePkt * 100U) / st.pkt_total);
         if (st.status == OTA_STATUS_APPLYING || st.status == OTA_STATUS_OK)
             pct = 100;
     } else if (st.file_size > 0 && st.recv_size > 0) {
@@ -783,35 +1168,32 @@ void DopplerMainWindow::updateOtaUi()
         if (pct > 100)
             pct = 100;
     }
+    if (failed && pct == 0 && st.pkt_total > 0)
+        pct = (int)((donePkt * 100U) / st.pkt_total);
     m_otaProgress->setValue(pct);
+    setLabelTextIfChanged(m_lblOtaPercent, QStringLiteral("%1%").arg(pct));
 
     const QString slot = (st.active_slot == OTA_SLOT_B)
             ? QStringLiteral("B") : QStringLiteral("A");
-    QString detail = QStringLiteral("当前固件：%1 · 活动槽 %2\n")
+    QString detail = QStringLiteral("当前固件  %1\n活动槽位  %2\n")
             .arg(QString::fromLatin1(fw)).arg(slot);
     if (blocking) {
-        detail += QStringLiteral("会话版本：%1\n包进度：%2 / %3 · 已收 %4 字节 / 文件 %5")
+        detail += QStringLiteral("会话版本  %1\n包进度    %2 / %3\n已接收    %4 / %5 字节")
                 .arg(QString::fromLatin1(st.version))
-                .arg(st.pkt_expect > 0 ? st.pkt_expect - 1 : 0)
+                .arg(donePkt)
                 .arg(st.pkt_total)
                 .arg(st.recv_size)
                 .arg(st.file_size);
-        if (st.reboot_pending || st.status == OTA_STATUS_OK)
-            detail += QStringLiteral("\n即将重启以激活新固件…");
-    } else {
-        detail += QStringLiteral("等待网页下发固件包。");
-    }
-    m_lblOtaDetail->setText(detail);
-
-    if (st.have_last_result) {
-        m_lblOtaResult->setText(
-            QStringLiteral("最近结果：%1 · 错误 %2 · 版本 %3")
-                .arg(st.last_ok ? QStringLiteral("成功") : QStringLiteral("失败"))
+        if (success)
+            detail += QStringLiteral("\n\n新固件已就绪，设备即将重启激活…");
+    } else if (failed) {
+        detail += QStringLiteral("失败原因  %1\n目标版本  %2\n\n可点右上角返回首页，稍后由网页重试。")
                 .arg(otaErrText(st.last_err))
-                .arg(QString::fromLatin1(st.last_version)));
+                .arg(QString::fromLatin1(st.last_version));
     } else {
-        m_lblOtaResult->setText(QStringLiteral("最近结果：尚无（本次启动后未完成过升级会话）"));
+        detail += QStringLiteral("\n尚未开始传输。收到网页升级指令后将自动全屏锁定。");
     }
+    setLabelTextIfChanged(m_lblOtaDetail, detail);
 }
 
 void DopplerMainWindow::loadDeviceLog(int filterMode)
@@ -914,11 +1296,27 @@ void DopplerMainWindow::onApplyWaterCm()
 {
     if (m_otaUiLocked || !m_bizOk)
         return;
+
+    const QString input = m_editWaterCm ? m_editWaterCm->text().trimmed() : QString();
+    if (input.isEmpty()) {
+        /* 未输入：按当前传感器水位加测上报 */
+        Sensor_SetOverrideWaterCm(SHUIWEI_CELIU_USE_SENSOR);
+        {
+            int force = 1;
+            SendDopplerRealData(&force);
+        }
+        appendUiLog(QStringLiteral("未输入水位，已按传感器原水位加测上报"));
+        QMessageBox::information(this, QStringLiteral("水位测流"),
+                                 QStringLiteral("未输入水位，已按当前传感器水位加测上报。"));
+        onRefresh();
+        return;
+    }
+
     bool ok = false;
-    const int cm = m_editWaterCm->text().trimmed().toInt(&ok);
+    const int cm = input.toInt(&ok);
     if (!ok) {
         QMessageBox::warning(this, QStringLiteral("水位"),
-                             QStringLiteral("请输入整数厘米，例如 150"));
+                             QStringLiteral("请输入整数厘米，例如 150；留空则用传感器水位。"));
         return;
     }
     Sensor_SetOverrideWaterCm(cm);
@@ -945,9 +1343,20 @@ void DopplerMainWindow::loadConfigToViewer()
     const QByteArray raw = f.readAll();
     f.close();
 
-    QString text = QString::fromUtf8(raw);
-    if (text.contains(QChar::ReplacementCharacter))
-        text = QString::fromLocal8Bit(raw);
+    QString text = decodeConfBytes(raw);
+    /* 文件里曾有高位字节，解码后却无汉字：多半是旧版息屏写入把 UTF-8 写坏了 */
+    bool hasHigh = false;
+    for (int i = 0; i < raw.size(); ++i) {
+        if ((unsigned char)raw.at(i) >= 0x80U) {
+            hasHigh = true;
+            break;
+        }
+    }
+    if (hasHigh && !confTextHasCjk(text)) {
+        text += QStringLiteral(
+            "\n\n# —— 提示：配置注释中文异常，请重新部署仓库里的 doppler.conf（UTF-8）——");
+    }
+    applyCjkUiFont(m_cfgView);
     m_cfgView->setPlainText(text);
 }
 
@@ -973,7 +1382,7 @@ void DopplerMainWindow::loadEditableFieldsFromConf()
     QFile f(path);
     QString text;
     if (f.open(QIODevice::ReadOnly)) {
-        text = QString::fromUtf8(f.readAll());
+        text = decodeConfBytes(f.readAll());
         f.close();
     }
     m_editStationId->setText(confValueOf(text, QStringLiteral("StationID")));
@@ -992,7 +1401,7 @@ bool DopplerMainWindow::writeEditableFieldsToConf()
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly))
         return false;
-    QString text = QString::fromUtf8(f.readAll());
+    QString text = decodeConfBytes(f.readAll());
     f.close();
 
     QMap<QString, QString> updates;
@@ -1063,7 +1472,17 @@ void DopplerMainWindow::onShowConfigEditPage()
 
 bool DopplerMainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (event->type() == QEvent::MouseButtonPress) {
+    const QEvent::Type t = event->type();
+    if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick
+            || t == QEvent::TouchBegin || t == QEvent::KeyPress) {
+        if (watched == m_blankCover && m_screenBlanked) {
+            wakeScreen();
+            return true;
+        }
+        noteUserActivity();
+    }
+
+    if (t == QEvent::MouseButtonPress) {
         QLineEdit *edit = qobject_cast<QLineEdit *>(watched);
         if (edit == m_editStationId || edit == m_editCenterId || edit == m_editPassword
                 || edit == m_editCollect || edit == m_editReport || edit == m_editTimeout) {
@@ -1072,6 +1491,172 @@ bool DopplerMainWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+void DopplerMainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (m_blankCover)
+        m_blankCover->setGeometry(rect());
+}
+
+void DopplerMainWindow::noteUserActivity()
+{
+    m_idleSince.restart();
+    if (m_screenBlanked)
+        wakeScreen();
+}
+
+void DopplerMainWindow::blankScreen()
+{
+    if (m_screenBlanked || m_otaUiLocked)
+        return;
+    m_screenBlanked = true;
+    BoardDisplay::blank();
+    if (m_blankCover) {
+        m_blankCover->setGeometry(rect());
+        m_blankCover->show();
+        m_blankCover->raise();
+    }
+}
+
+void DopplerMainWindow::wakeScreen()
+{
+    m_idleSince.restart();
+    if (!m_screenBlanked)
+        return;
+    m_screenBlanked = false;
+    BoardDisplay::unblank();
+    if (m_blankCover)
+        m_blankCover->hide();
+}
+
+void DopplerMainWindow::applyBlankMinutes(int minutes, bool save)
+{
+    if (minutes < 1)
+        minutes = 1;
+    if (minutes > 5)
+        minutes = 5;
+    m_blankMinutes = minutes;
+    m_idleSince.restart();
+    refreshBlankMinuteButtons();
+    if (save) {
+        if (saveBlankMinutesToConf(minutes)) {
+            appendUiLog(QStringLiteral("息屏已设为 %1 分钟").arg(minutes));
+            setLabelTextIfChanged(m_lblBlankHint,
+                                  QStringLiteral("当前：无操作 %1 分钟后息屏。点屏幕任意处亮屏；升级中不息屏。")
+                                      .arg(minutes));
+        } else {
+            QMessageBox::warning(this, QStringLiteral("息屏设置"),
+                                 QStringLiteral("无法写入 doppler.conf，本次仅本次运行有效。"));
+        }
+    }
+}
+
+void DopplerMainWindow::refreshBlankMinuteButtons()
+{
+    for (int i = 0; i < 5; ++i) {
+        if (!m_btnBlankMin[i])
+            continue;
+        const bool sel = (i + 1 == m_blankMinutes);
+        m_btnBlankMin[i]->setObjectName(sel ? QStringLiteral("selectedBtn")
+                                              : QString());
+        /* 触发样式刷新 */
+        m_btnBlankMin[i]->style()->unpolish(m_btnBlankMin[i]);
+        m_btnBlankMin[i]->style()->polish(m_btnBlankMin[i]);
+        m_btnBlankMin[i]->update();
+    }
+}
+
+int DopplerMainWindow::loadBlankMinutesFromConf() const
+{
+    const QString path = configFilePath();
+    if (path.isEmpty())
+        return 5;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return 5;
+    const QString text = decodeConfBytes(f.readAll());
+    f.close();
+    const QStringList lines = text.split(QChar('\n'));
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines.at(i).trimmed();
+        if (line.startsWith(QLatin1Char('#')) || line.isEmpty())
+            continue;
+        const int eq = line.indexOf(QLatin1Char('='));
+        if (eq <= 0)
+            continue;
+        QString key = line.left(eq).trimmed();
+        QString val = line.mid(eq + 1).trimmed();
+        if (key.compare(QStringLiteral("ScreenBlankMinutes"), Qt::CaseInsensitive) == 0) {
+            bool ok = false;
+            const int n = val.toInt(&ok);
+            if (ok && n >= 1 && n <= 5)
+                return n;
+        }
+    }
+    return 5;
+}
+
+bool DopplerMainWindow::saveBlankMinutesToConf(int minutes) const
+{
+    const QString path = configFilePath();
+    if (path.isEmpty())
+        return false;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    QString text = decodeConfBytes(f.readAll());
+    f.close();
+
+    QStringList lines = text.split(QChar('\n'));
+    bool found = false;
+    for (int i = 0; i < lines.size(); ++i) {
+        QString trimmed = lines.at(i).trimmed();
+        if (trimmed.startsWith(QLatin1Char('#')) || trimmed.isEmpty())
+            continue;
+        const int eq = trimmed.indexOf(QLatin1Char('='));
+        if (eq <= 0)
+            continue;
+        QString key = trimmed.left(eq).trimmed();
+        if (key.compare(QStringLiteral("ScreenBlankMinutes"), Qt::CaseInsensitive) == 0) {
+            lines[i] = QStringLiteral("ScreenBlankMinutes = %1").arg(minutes);
+            found = true;
+        }
+    }
+    if (!found)
+        lines.append(QStringLiteral("ScreenBlankMinutes = %1").arg(minutes));
+
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    /* 统一写成 UTF-8，保留中文注释 */
+    QByteArray out = lines.join(QChar('\n')).toUtf8();
+    if (!out.endsWith('\n'))
+        out.append('\n');
+    const bool ok = (f.write(out) == out.size());
+    f.close();
+    return ok;
+}
+
+void DopplerMainWindow::onShowBlankSettingsPage()
+{
+    if (m_otaUiLocked)
+        return;
+    noteUserActivity();
+    refreshBlankMinuteButtons();
+    setLabelTextIfChanged(m_lblBlankHint,
+                          QStringLiteral("当前：无操作 %1 分钟后息屏。点屏幕任意处亮屏；升级中不息屏。")
+                              .arg(m_blankMinutes));
+    m_stack->setCurrentWidget(m_pageBlankSettings);
+}
+
+void DopplerMainWindow::onBlankMinutesChosen()
+{
+    QPushButton *btn = qobject_cast<QPushButton *>(sender());
+    if (!btn)
+        return;
+    const int minutes = btn->property("blankMin").toInt();
+    applyBlankMinutes(minutes, true);
 }
 
 void DopplerMainWindow::onCfgFieldFocus()
@@ -1182,31 +1767,19 @@ void DopplerMainWindow::onStartBusiness()
 
 void DopplerMainWindow::updateHomeStatus()
 {
-    if (m_lblStatus == 0)
-        return;
-
-    QString line;
-    if (!m_bizOk) {
-        line = QStringLiteral("状态：业务未就绪 · 请检查 doppler.conf / 串口");
-    } else {
-        const QString sensor = g_stMeasureConfig.u8SensorSimulate
-                ? QStringLiteral("传感器：模拟")
-                : QStringLiteral("传感器：真实");
-        QString link;
-        if (WebLink_IsSocketMode()) {
-            link = SocketLink_IsConnected()
-                    ? QStringLiteral("链路：Socket 已连接")
-                    : QStringLiteral("链路：Socket 未连接");
-        } else {
-            link = QStringLiteral("链路：DTU 串口");
-        }
-        if (UplinkOffline_IsOnline())
-            link += QStringLiteral(" · 在线");
+    const bool bizOk = m_bizOk;
+    const bool sensorReal = bizOk && (g_stMeasureConfig.u8SensorSimulate == 0);
+    bool linkOk = false;
+    if (bizOk) {
+        if (WebLink_IsSocketMode())
+            linkOk = SocketLink_IsConnected() != 0;
         else
-            link += QStringLiteral(" · 离线缓存");
-        line = QStringLiteral("状态：运行中 · %1 · %2").arg(sensor, link);
+            linkOk = UplinkOffline_IsOnline() != 0;
     }
-    setLabelTextIfChanged(m_lblStatus, line);
+
+    setStatusChip(m_lblStatBiz, QStringLiteral("业务"), bizOk);
+    setStatusChip(m_lblStatSensor, QStringLiteral("传感器"), sensorReal);
+    setStatusChip(m_lblStatLink, QStringLiteral("链路"), linkOk);
 }
 
 void DopplerMainWindow::onRefresh()
@@ -1234,6 +1807,14 @@ void DopplerMainWindow::onRefresh()
                 || m_stack->currentWidget() == m_pageOta) {
             updateOtaUi();
         }
+        if (otaBusy || m_otaUiLocked)
+            wakeScreen();
+    }
+
+    if (!m_screenBlanked && !m_otaUiLocked && m_blankMinutes >= 1) {
+        const qint64 idleMs = m_idleSince.elapsed();
+        if (idleMs >= (qint64)m_blankMinutes * 60LL * 1000LL)
+            blankScreen();
     }
 
     if (!m_bizOk || m_otaUiLocked || OtaUpgrade_IsBusy())
@@ -1290,14 +1871,70 @@ void DopplerMainWindow::onExit()
                              QStringLiteral("正在升级固件，请勿退出或断电。"));
         return;
     }
-    const int ret = QMessageBox::question(
-        this, QStringLiteral("退出程序"),
-        QStringLiteral("确定要退出监测程序吗？退出后需手动或开机脚本再启动。"),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (ret != QMessageBox::Yes)
+    noteUserActivity();
+    if (m_editExitPwd)
+        m_editExitPwd->clear();
+    if (m_lblExitPwdHint) {
+        setLabelTextIfChanged(m_lblExitPwdHint,
+                              QStringLiteral("请输入退出密码后点「确认退出」。"));
+    }
+    m_stack->setCurrentWidget(m_pageExitAuth);
+}
+
+void DopplerMainWindow::onExitPwdDigit()
+{
+    QPushButton *btn = qobject_cast<QPushButton *>(sender());
+    if (!btn || !m_editExitPwd)
         return;
+    if (m_editExitPwd->text().size() >= 12)
+        return;
+    m_editExitPwd->setText(m_editExitPwd->text() + btn->text());
+}
+
+void DopplerMainWindow::onExitPwdBackspace()
+{
+    if (!m_editExitPwd)
+        return;
+    QString t = m_editExitPwd->text();
+    if (!t.isEmpty())
+        t.chop(1);
+    m_editExitPwd->setText(t);
+}
+
+void DopplerMainWindow::onExitPwdClear()
+{
+    if (m_editExitPwd)
+        m_editExitPwd->clear();
+}
+
+QString DopplerMainWindow::exitPassword() const
+{
+    /* 固定退出密码，不写 conf */
+    return QStringLiteral("111111");
+}
+
+void DopplerMainWindow::onExitConfirm()
+{
+    if (m_otaUiLocked)
+        return;
+    const QString expect = exitPassword();
+    const QString got = m_editExitPwd ? m_editExitPwd->text() : QString();
+    if (got != expect) {
+        if (m_editExitPwd)
+            m_editExitPwd->clear();
+        setLabelTextIfChanged(m_lblExitPwdHint, QStringLiteral("密码错误，请重试。"));
+        QMessageBox::warning(this, QStringLiteral("退出程序"),
+                             QStringLiteral("密码错误"));
+        return;
+    }
+    doExitProgram();
+}
+
+void DopplerMainWindow::doExitProgram()
+{
     hide();
     QApplication::processEvents();
     BoardBuzzer::forceOff();
+    BoardDisplay::unblank();
     ::_exit(0);
 }

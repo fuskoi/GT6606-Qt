@@ -25,12 +25,14 @@ SOURCES += \
     doppler_ui/doppler_main.cpp \
     doppler_ui/doppler_mainwindow.cpp \
     doppler_ui/board_buzzer.cpp \
+    doppler_ui/board_display.cpp \
     doppler_ui/button_beep_filter.cpp
 
 HEADERS += \
     doppler/DopplerApp.h \
     doppler_ui/doppler_mainwindow.h \
     doppler_ui/board_buzzer.h \
+    doppler_ui/board_display.h \
     doppler_ui/button_beep_filter.h
 
 SOURCES += \

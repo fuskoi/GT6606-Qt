@@ -156,26 +156,28 @@ void TickPrintDateTime(void* arg)
         uint32_t u32Recv = 0;
         int kickRet = 0;
 
-        /* 约 4s 无新包：重发 lastOk；约 60s 仍无进度：放弃并 WARNING */
-        kickRet = OtaUpgrade_KickIfStalled(4000U);
+        /* 约 2~4s 无新包：重发 lastOk；Socket 约 3 分钟 / DTU 约 1 分钟仍无进度则放弃 */
+        kickRet = OtaUpgrade_KickIfStalled(0U);
         if (kickRet < 0) {
             s_i32OtaHbSec = 0;
             LOG(LOG_WARNING,
-                "ota: no packet over 1 min, abort upgrade and resume normal work");
+                "ota: no packet over 3 min, abort upgrade and resume normal work");
             return;
         }
         if (kickRet > 0) {
             s_i32OtaHbSec = 0;
         }
-        /* OTA 时定时器线程仍活：每 10s 打进度；fifo=0 表示 MCU 根本没收到下一包 */
+        /* OTA 时定时器线程仍活：每 10s 打进度；fifo=0 表示根本没收到下一包 */
         if (++s_i32OtaHbSec >= 10) {
             uint32_t u32Fifo = 0;
             int hostPort = g_stDevicelist.HOST_COMPUTER;
 
             s_i32OtaHbSec = 0;
             (void)OtaUpgrade_GetProgress(&u16Expect, &u16Total, &u32Recv);
-            if (hostPort >= 0 && hostPort < MAX_UART_NUM &&
-                g_stDevicelist.UartList[hostPort].ringfifo != NULL) {
+            if (WebLink_IsSocketMode()) {
+                u32Fifo = SocketLink_RxQueued();
+            } else if (hostPort >= 0 && hostPort < MAX_UART_NUM &&
+                       g_stDevicelist.UartList[hostPort].ringfifo != NULL) {
                 u32Fifo = kfifo_len(g_stDevicelist.UartList[hostPort].ringfifo);
             }
             LOG(LOG_DEBUG, "ota heartbeat expect_pkt=%u/%u recv=%u fifo=%u",
