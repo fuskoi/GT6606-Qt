@@ -105,7 +105,10 @@ const RunSectionData* SectionParam_GetRunSection(void);
 int SectionParam_IsCrossSectionReady(void);
 int SectionParam_IsRunSectionReady(void);
 int SectionParam_CalcWettedArea(int32_t i32WaterScaled, SectionWettedArea* pOut);
-/* pfSensorVelocities / pu8SensorValid 按传感器下标：0=sensor1(上测线), 1=sensor2(下测线) */
+/* pfSensorVelocities / pu8SensorValid 按传感器下标：
+ * 0=sensor1（下测线，现场从下往上编号的 1 号）
+ * 1=sensor2（上测线，编号更高/更靠上）
+ */
 int SectionParam_CalcTotalDischarge(int32_t i32WaterScaled,
                                     const float* pfSensorVelocities,
                                     const uint8_t* pu8SensorValid,

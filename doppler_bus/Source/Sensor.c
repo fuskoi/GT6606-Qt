@@ -418,7 +418,7 @@ static void sensor_log_cycle_complete(void)
         g_astSensorLines[i].stRaw = g_stSensorRaw[i];
         g_astSensorLines[i].stCaptureTime = tmNow;
         g_astSensorLines[i].u8Valid = 1;
-        /* 下标固定：0=sensor1(上), 1=sensor2(下)，供本地算 Q 绑定测线 */
+        /* 下标固定：0=sensor1(下), 1=sensor2(上)，与现场从下往上编号一致 */
         afSensorVel[i] = g_stSensorRaw[i].fFlowVelocity;
         au8SensorValid[i] = 1;
         fWaterSum += g_stSensorRaw[i].fWaterLevel;

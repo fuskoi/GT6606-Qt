@@ -441,8 +441,8 @@ void DopplerMainWindow::buildUi()
 
     m_sectionView = new SectionView(m_pageHome);
 
-    QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1 (m/s)"), &m_valVel1, true);
-    QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2 (m/s)"), &m_valVel2, true);
+    QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1 下 (m/s)"), &m_valVel1, true);
+    QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2 上 (m/s)"), &m_valVel2, true);
     QWidget *tileWater = makeMetricTile(QStringLiteral("水位 (m)"), &m_valWater, true);
     QWidget *tileSec = makeMetricTile(QStringLiteral("秒流量 (m³/s)"), &m_valSecFlow, true);
     QWidget *tileHour = makeMetricTile(QStringLiteral("小时流量 (m³/h)"), &m_valHourFlow, true);

@@ -1259,7 +1259,9 @@ static uint8_t section_line_mode_coef(const SpeedLineItem* pLine, uint8_t u8Mode
     return pLine->u8LowCoef;
 }
 
-/* 褰撳墠姘翠綅妯″紡涓嬫湁鏁堟祴绾匡紝鎸夋渤搴曢珮绋嬩粠楂樺埌浣庢帓搴忓悗锛氫笂鈫抯ensor1锛屼笅鈫抯ensor2 */
+/* 当前水位模式下有效测线，按河底高程从高到低排序后：
+ * 数组[0]=上测线几何，[1]=下测线几何（与传感器编号无关，流速另按 1=下/2=上绑定）
+ */
 static int section_pick_active_lines_by_bed(uint8_t u8Mode, int16_t* piOutIdx, int16_t* piOutCount)
 {
     int16_t i = 0;
@@ -1360,22 +1362,22 @@ int SectionParam_CalcTotalDischarge(int32_t i32WaterScaled,
         return ERROR;
     }
 
-    /* 鍏ュ彛娴侀€熶慨绾︼細涓婃祴绾库啋sensor1锛屼笅娴嬬嚎鈫抯ensor2 */
+    /* 现场从下往上编号：sensor1=下测线，sensor2=上测线 */
     if (u8SensorMax >= 1 && pu8SensorValid[0]) {
-        fVelUpper = pfSensorVelocities[0];
-        if (fVelUpper < 0.0f) {
-            fVelUpper = 0.0f;
-        }
-        fVelUpper = (float)hydrology_round_velocity((double)fVelUpper);
-        hasUpperVel = 1;
-    }
-    if (u8SensorMax >= 2 && pu8SensorValid[1]) {
-        fVelLower = pfSensorVelocities[1];
+        fVelLower = pfSensorVelocities[0];
         if (fVelLower < 0.0f) {
             fVelLower = 0.0f;
         }
         fVelLower = (float)hydrology_round_velocity((double)fVelLower);
         hasLowerVel = 1;
+    }
+    if (u8SensorMax >= 2 && pu8SensorValid[1]) {
+        fVelUpper = pfSensorVelocities[1];
+        if (fVelUpper < 0.0f) {
+            fVelUpper = 0.0f;
+        }
+        fVelUpper = (float)hydrology_round_velocity((double)fVelUpper);
+        hasUpperVel = 1;
     }
 
     if (i16ActiveCount >= 2) {
@@ -1431,18 +1433,18 @@ int SectionParam_CalcTotalDischarge(int32_t i32WaterScaled,
             fQLower = fAreaLower * (double)fVelLower;
         }
         if (fAreaUpper > 0.0 && !hasUpperVel) {
-            LOG(LOG_WARNING, "total discharge: upper area>0 but sensor1 invalid");
+            LOG(LOG_WARNING, "total discharge: upper area>0 but sensor2(upper) invalid");
             return ERROR;
         }
         if (fAreaLower > 0.0 && !hasLowerVel) {
-            LOG(LOG_WARNING, "total discharge: lower area>0 but sensor2 invalid");
+            LOG(LOG_WARNING, "total discharge: lower area>0 but sensor1(lower) invalid");
             return ERROR;
         }
         if (fAreaUpper <= 0.0 && fAreaLower <= 0.0) {
             return ERROR;
         }
     } else {
-        /* 浠呬竴鏉℃湁鏁堟祴绾匡細鏁存柇闈?脳 瀵瑰簲浼犳劅鍣紙涓婄嚎鐢?s1锛屽惁鍒欑敤 s2锛?*/
+        /* 仅一条有效测线：整断面 × 对应传感器（优先 sensor1=下，否则 sensor2=上） */
         float fVel = 0.0f;
         uint8_t u8Sensor = 0;
 
@@ -1453,10 +1455,11 @@ int SectionParam_CalcTotalDischarge(int32_t i32WaterScaled,
             return ERROR;
         }
         u8Sensor = 0;
-        if (!hasUpperVel && hasLowerVel) {
-            u8Sensor = 1;
+        if (hasLowerVel) {
+            u8Sensor = 0;
             fVel = fVelLower;
         } else if (hasUpperVel) {
+            u8Sensor = 1;
             fVel = fVelUpper;
         } else {
             return ERROR;
@@ -1494,8 +1497,8 @@ int SectionParam_CalcTotalDischarge(int32_t i32WaterScaled,
     }
 
     LOG(LOG_DEBUG,
-        "total discharge: water=%.2f split=%.2f Au=%.2f(v1=%.3f)->Qu=%.3f "
-        "Al=%.2f(v2=%.3f)->Ql=%.3f A=%.2f avgVel=%.3f(=Q/A) width=%.2f Q=%.3f m3/s",
+        "total discharge: water=%.2f split=%.2f Au=%.2f(sensor2_upper=%.3f)->Qu=%.3f "
+        "Al=%.2f(sensor1_lower=%.3f)->Ql=%.3f A=%.2f avgVel=%.3f(=Q/A) width=%.2f Q=%.3f m3/s",
         stArea.fWaterElevation,
         stArea.fSplitElev,
         stArea.fAreaUpper,
