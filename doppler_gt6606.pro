@@ -24,6 +24,7 @@ SOURCES += \
     doppler/DopplerApp.c \
     doppler_ui/doppler_main.cpp \
     doppler_ui/doppler_mainwindow.cpp \
+    doppler_ui/section_view.cpp \
     doppler_ui/board_buzzer.cpp \
     doppler_ui/board_display.cpp \
     doppler_ui/button_beep_filter.cpp
@@ -31,6 +32,7 @@ SOURCES += \
 HEADERS += \
     doppler/DopplerApp.h \
     doppler_ui/doppler_mainwindow.h \
+    doppler_ui/section_view.h \
     doppler_ui/board_buzzer.h \
     doppler_ui/board_display.h \
     doppler_ui/button_beep_filter.h

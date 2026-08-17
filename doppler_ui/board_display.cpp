@@ -11,6 +11,7 @@
 
 namespace {
 
+/* 向指定路径写入文本（如 brightness / blank），成功返回 true。 */
 bool write_file(const char *path, const char *text)
 {
     const int fd = ::open(path, O_WRONLY | O_CLOEXEC);
@@ -22,6 +23,7 @@ bool write_file(const char *path, const char *text)
     return (w == (ssize_t)n);
 }
 
+/* 遍历 /sys/class/backlight，on=1 设为最大亮度，on=0 写 0。 */
 bool try_backlight(int on)
 {
     DIR *dir = opendir("/sys/class/backlight");
@@ -59,11 +61,13 @@ bool try_backlight(int on)
     return ok;
 }
 
+/* 通过 sysfs 控制 fb0 blank（1=灭，0=亮）。 */
 bool try_fb_sysfs(int blank)
 {
     return write_file("/sys/class/graphics/fb0/blank", blank ? "1" : "0");
 }
 
+/* sysfs 失败时，用 FBIOBLANK ioctl 控制 /dev/fb0。 */
 bool try_fb_ioctl(int blank)
 {
     const int fd = ::open("/dev/fb0", O_RDWR | O_CLOEXEC);
@@ -79,6 +83,7 @@ bool try_fb_ioctl(int blank)
 
 namespace BoardDisplay {
 
+/* 息屏：先关背光，再 blank framebuffer。 */
 void blank(void)
 {
     (void)try_backlight(0);
@@ -86,6 +91,7 @@ void blank(void)
         (void)try_fb_ioctl(1);
 }
 
+/* 亮屏：先 unblank framebuffer，再开背光。 */
 void unblank(void)
 {
     if (!try_fb_sysfs(0))

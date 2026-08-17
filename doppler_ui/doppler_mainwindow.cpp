@@ -1,4 +1,5 @@
 ﻿#include "doppler_mainwindow.h"
+#include "section_view.h"
 #include "board_buzzer.h"
 #include "board_display.h"
 
@@ -43,11 +44,14 @@ extern "C" {
 #include "FirmwareVersion.h"
 #include "SocketLink.h"
 #include "UplinkOffline.h"
+#include "SectionParam.h"
+#include "Dam5213.h"
 }
 
 namespace {
 const size_t kDeviceLogExportMax = 512U * 1024U;
 
+/* 仅当文案变化时 setText，减少无谓重绘。 */
 void setLabelTextIfChanged(QLabel *lab, const QString &text)
 {
     if (lab == 0)
@@ -57,6 +61,7 @@ void setLabelTextIfChanged(QLabel *lab, const QString &text)
     lab->setText(text);
 }
 
+/* 设置顶栏状态灯 HTML（绿/红圆点 + 名称）。 */
 void setStatusChip(QLabel *lab, const QString &name, bool ok)
 {
     if (lab == 0)
@@ -70,6 +75,7 @@ void setStatusChip(QLabel *lab, const QString &name, bool ok)
     lab->setText(html);
 }
 
+/* 更新 OTA 徽章文案与色调（busy/ok/fail/idle）。 */
 void setOtaBadge(QLabel *lab, const QString &tone, const QString &text)
 {
     if (lab == 0)
@@ -90,6 +96,7 @@ void setOtaBadge(QLabel *lab, const QString &tone, const QString &text)
         " padding:8px 18px; font-size:20px; font-weight:bold; }").arg(bg));
 }
 
+/* 检测字符串是否含中日韩统一表意文字。 */
 bool confTextHasCjk(const QString &text)
 {
     for (int i = 0; i < text.size(); ++i) {
@@ -100,6 +107,7 @@ bool confTextHasCjk(const QString &text)
     return false;
 }
 
+/* 将 conf 原始字节按 UTF-8/本地编码解码为 QString。 */
 QString decodeConfBytes(const QByteArray &rawIn)
 {
     QByteArray raw = rawIn;
@@ -128,6 +136,7 @@ QString decodeConfBytes(const QByteArray &rawIn)
     return QString::fromLocal8Bit(raw);
 }
 
+/* 为控件设置可显示中文的 UI 字体族。 */
 void applyCjkUiFont(QWidget *w)
 {
     if (w == 0)
@@ -180,6 +189,7 @@ void applyCjkUiFont(QWidget *w)
 }
 }
 
+/* 构造主窗口：初始化成员、buildUi、启动 1s 刷新定时器。 */
 DopplerMainWindow::DopplerMainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_root(0)
@@ -198,6 +208,7 @@ DopplerMainWindow::DopplerMainWindow(QWidget *parent)
     , m_lblStatBiz(0)
     , m_lblStatSensor(0)
     , m_lblStatLink(0)
+    , m_sectionView(0)
     , m_cfgActiveEdit(0)
     , m_blankMinutes(5)
     , m_screenBlanked(false)
@@ -223,10 +234,12 @@ DopplerMainWindow::DopplerMainWindow(QWidget *parent)
     appendUiLog(QStringLiteral("息屏时间：%1 分钟（菜单可改）").arg(m_blankMinutes));
 }
 
+/* 析构主窗口。 */
 DopplerMainWindow::~DopplerMainWindow()
 {
 }
 
+/* 拼接并返回 doppler.conf 绝对路径。 */
 QString DopplerMainWindow::configFilePath() const
 {
     char dir[MAX_PATH];
@@ -236,25 +249,30 @@ QString DopplerMainWindow::configFilePath() const
     return QString::fromLocal8Bit(dir) + QStringLiteral(CONFIG_FILE_PATH);
 }
 
-QWidget *DopplerMainWindow::makeMetricTile(const QString &caption, QLabel **valueLabel)
+/* 创建首页指标卡片；compact 用于右侧竖排小卡片。 */
+QWidget *DopplerMainWindow::makeMetricTile(const QString &caption, QLabel **valueLabel, bool compact)
 {
     QFrame *tile = new QFrame(m_pageHome);
-    tile->setObjectName(QStringLiteral("metricTile"));
+    tile->setObjectName(compact ? QStringLiteral("metricTileCompact")
+                                : QStringLiteral("metricTile"));
     tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     QLabel *cap = new QLabel(caption, tile);
-    cap->setObjectName(QStringLiteral("metricCap"));
+    cap->setObjectName(compact ? QStringLiteral("metricCapCompact")
+                               : QStringLiteral("metricCap"));
     cap->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     cap->setWordWrap(true);
 
     QLabel *val = new QLabel(QStringLiteral("--"), tile);
-    val->setObjectName(QStringLiteral("metricVal"));
+    val->setObjectName(compact ? QStringLiteral("metricValCompact")
+                               : QStringLiteral("metricVal"));
     val->setAlignment(Qt::AlignCenter);
     val->setWordWrap(true);
 
     QVBoxLayout *vl = new QVBoxLayout(tile);
-    vl->setContentsMargins(12, 14, 12, 14);
-    vl->setSpacing(6);
+    vl->setContentsMargins(compact ? 8 : 12, compact ? 6 : 14,
+                           compact ? 8 : 12, compact ? 6 : 14);
+    vl->setSpacing(compact ? 2 : 6);
     vl->addWidget(cap);
     vl->addWidget(val, 1);
 
@@ -262,6 +280,7 @@ QWidget *DopplerMainWindow::makeMetricTile(const QString &caption, QLabel **valu
     return tile;
 }
 
+/* 在配置编辑网格中创建「标题 + 输入框」一对控件。 */
 QLineEdit *DopplerMainWindow::makeCfgField(QWidget *parent, const QString &caption,
                                           QGridLayout *grid, int row, int pair,
                                           const char *keyName)
@@ -283,6 +302,7 @@ QLineEdit *DopplerMainWindow::makeCfgField(QWidget *parent, const QString &capti
     return edit;
 }
 
+/* 搭建全部页面布局、样式表与信号槽。 */
 void DopplerMainWindow::buildUi()
 {
     m_root = new QWidget(this);
@@ -300,8 +320,12 @@ void DopplerMainWindow::buildUi()
         "}"
         "QLabel#metaText { color:#243447; font-size:20px; font-weight:bold; }"
         "QFrame#metricTile { background-color:#ffffff; border:2px solid #c9d4df; border-radius:10px; }"
+        "QFrame#metricTileCompact { background-color:#ffffff; border:2px solid #c9d4df; border-radius:8px; }"
         "QLabel#metricCap { color:#3b4d61; font-size:18px; font-weight:bold; }"
+        "QLabel#metricCapCompact { color:#3b4d61; font-size:13px; font-weight:bold; }"
         "QLabel#metricVal { color:#0b1c2c; font-size:40px; font-weight:bold; }"
+        "QLabel#metricValCompact { color:#0b1c2c; font-size:22px; font-weight:bold; }"
+        "QLabel#uptimeChip { color:#334155; font-size:16px; font-weight:bold; }"
         "QLabel#pageTitle { color:#102033; font-size:24px; font-weight:bold; }"
         "QLabel#hintText { color:#3b4d61; font-size:16px; }"
         "QPushButton {"
@@ -399,6 +423,8 @@ void DopplerMainWindow::buildUi()
 
     m_lblClock = new QLabel(topBar);
     m_lblClock->setObjectName(QStringLiteral("clock"));
+    m_valUptime = new QLabel(QStringLiteral("运行 00:00:00"), topBar);
+    m_valUptime->setObjectName(QStringLiteral("uptimeChip"));
 
     QHBoxLayout *topLay = new QHBoxLayout(topBar);
     topLay->setContentsMargins(16, 10, 16, 10);
@@ -409,30 +435,37 @@ void DopplerMainWindow::buildUi()
     topLay->addWidget(m_lblStatSensor, 0);
     topLay->addWidget(m_lblStatLink, 0);
     topLay->addStretch(1);
+    topLay->addWidget(m_valUptime, 0);
+    topLay->addSpacing(8);
     topLay->addWidget(m_lblClock, 0);
 
-    QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1\n(m/s)"), &m_valVel1);
-    QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2\n(m/s)"), &m_valVel2);
-    QWidget *tileWater = makeMetricTile(QStringLiteral("水位\n(m)"), &m_valWater);
-    QWidget *tileSec = makeMetricTile(QStringLiteral("秒流量\n(m³/s)"), &m_valSecFlow);
-    QWidget *tileHour = makeMetricTile(QStringLiteral("小时流量\n(m³/h)"), &m_valHourFlow);
-    QWidget *tileUp = makeMetricTile(QStringLiteral("运行时长"), &m_valUptime);
+    m_sectionView = new SectionView(m_pageHome);
 
-    QGridLayout *grid = new QGridLayout;
-    grid->setHorizontalSpacing(14);
-    grid->setVerticalSpacing(14);
-    grid->setContentsMargins(0, 0, 0, 0);
-    grid->addWidget(tileVel1, 0, 0);
-    grid->addWidget(tileVel2, 0, 1);
-    grid->addWidget(tileWater, 0, 2);
-    grid->addWidget(tileSec, 1, 0);
-    grid->addWidget(tileHour, 1, 1);
-    grid->addWidget(tileUp, 1, 2);
-    grid->setRowStretch(0, 1);
-    grid->setRowStretch(1, 1);
-    grid->setColumnStretch(0, 1);
-    grid->setColumnStretch(1, 1);
-    grid->setColumnStretch(2, 1);
+    QWidget *tileVel1 = makeMetricTile(QStringLiteral("流速 1 (m/s)"), &m_valVel1, true);
+    QWidget *tileVel2 = makeMetricTile(QStringLiteral("流速 2 (m/s)"), &m_valVel2, true);
+    QWidget *tileWater = makeMetricTile(QStringLiteral("水位 (m)"), &m_valWater, true);
+    QWidget *tileSec = makeMetricTile(QStringLiteral("秒流量 (m³/s)"), &m_valSecFlow, true);
+    QWidget *tileHour = makeMetricTile(QStringLiteral("小时流量 (m³/h)"), &m_valHourFlow, true);
+    QWidget *tileVolt = makeMetricTile(QStringLiteral("电压 (V)"), &m_valVoltage, true);
+
+    QWidget *metricCol = new QWidget(m_pageHome);
+    metricCol->setMinimumWidth(248);
+    metricCol->setMaximumWidth(280);
+    QVBoxLayout *metricLay = new QVBoxLayout(metricCol);
+    metricLay->setContentsMargins(0, 0, 0, 0);
+    metricLay->setSpacing(6);
+    metricLay->addWidget(tileVel1, 1);
+    metricLay->addWidget(tileVel2, 1);
+    metricLay->addWidget(tileWater, 1);
+    metricLay->addWidget(tileSec, 1);
+    metricLay->addWidget(tileHour, 1);
+    metricLay->addWidget(tileVolt, 1);
+
+    QHBoxLayout *mainRow = new QHBoxLayout;
+    mainRow->setContentsMargins(0, 0, 0, 0);
+    mainRow->setSpacing(12);
+    mainRow->addWidget(m_sectionView, 1);
+    mainRow->addWidget(metricCol, 0);
 
     m_btnFunc = new QPushButton(QStringLiteral("菜单"), m_pageHome);
     m_btnOpenWater = new QPushButton(QStringLiteral("设置水位加测"), m_pageHome);
@@ -457,9 +490,9 @@ void DopplerMainWindow::buildUi()
     homeLay->setSpacing(0);
     homeLay->addWidget(topBar, 0);
     QVBoxLayout *body = new QVBoxLayout;
-    body->setContentsMargins(18, 12, 18, 12);
-    body->setSpacing(10);
-    body->addLayout(grid, 1);
+    body->setContentsMargins(14, 10, 14, 10);
+    body->setSpacing(8);
+    body->addLayout(mainRow, 1);
     body->addWidget(homeBtnBar, 0);
     homeLay->addLayout(body, 1);
 
@@ -709,7 +742,6 @@ void DopplerMainWindow::buildUi()
     cfgEditLay->addLayout(cfgEditTop, 0);
     cfgEditLay->addLayout(fieldGrid, 0);
     cfgEditLay->addSpacing(6);
-    /* 键盘不要抢太多垂直空间 */
     cfgEditLay->addWidget(cfgPadHost, 1);
     cfgPadHost->setMaximumHeight(220);
 
@@ -969,6 +1001,7 @@ void DopplerMainWindow::buildUi()
     m_blankCover->setGeometry(0, 0, BOARD_WIDTH, BOARD_HEIGHT);
 }
 
+/* 按业务是否就绪启用/禁用采集上报等按钮。 */
 void DopplerMainWindow::setBizEnabled(bool on)
 {
     m_bizOk = on;
@@ -982,6 +1015,7 @@ void DopplerMainWindow::setBizEnabled(bool on)
     m_btnSaveConfigFields->setEnabled(on);
 }
 
+/* 向屏显日志追加带时间戳的一行。 */
 void DopplerMainWindow::appendUiLog(const QString &line)
 {
     const QString stamped = QDateTime::currentDateTime().toString(QStringLiteral("hh:mm:ss"))
@@ -991,6 +1025,7 @@ void DopplerMainWindow::appendUiLog(const QString &line)
         m_log->clear();
 }
 
+/* 切换到屏显运行日志页。 */
 void DopplerMainWindow::onShowLogPage()
 {
     if (m_otaUiLocked)
@@ -998,6 +1033,7 @@ void DopplerMainWindow::onShowLogPage()
     m_stack->setCurrentWidget(m_pageLog);
 }
 
+/* 切换到功能菜单页。 */
 void DopplerMainWindow::onShowFuncPage()
 {
     if (m_otaUiLocked)
@@ -1005,6 +1041,7 @@ void DopplerMainWindow::onShowFuncPage()
     m_stack->setCurrentWidget(m_pageFunc);
 }
 
+/* 切换到设置水位加测页。 */
 void DopplerMainWindow::onShowWaterPage()
 {
     if (m_otaUiLocked)
@@ -1012,12 +1049,14 @@ void DopplerMainWindow::onShowWaterPage()
     m_stack->setCurrentWidget(m_pageWater);
 }
 
+/* 切换到 OTA 全屏进度页。 */
 void DopplerMainWindow::onShowOtaPage()
 {
     updateOtaUi();
     m_stack->setCurrentWidget(m_pageOta);
 }
 
+/* OTA 锁定/解锁界面：锁定时强制进入 OTA 页。 */
 void DopplerMainWindow::setOtaUiLocked(bool locked)
 {
     if (m_otaUiLocked == locked)
@@ -1041,6 +1080,7 @@ void DopplerMainWindow::setOtaUiLocked(bool locked)
     }
 }
 
+/* 打开设备完整日志页并默认加载全部。 */
 void DopplerMainWindow::onShowDeviceLogPage()
 {
     if (m_otaUiLocked)
@@ -1048,21 +1088,25 @@ void DopplerMainWindow::onShowDeviceLogPage()
     m_stack->setCurrentWidget(m_pageDevLog);
 }
 
+/* 加载设备日志（全部）。 */
 void DopplerMainWindow::onLoadDeviceLogAll()
 {
     loadDeviceLog(0);
 }
 
+/* 加载设备日志（警告）。 */
 void DopplerMainWindow::onLoadDeviceLogWarn()
 {
     loadDeviceLog(1);
 }
 
+/* 加载设备日志（错误）。 */
 void DopplerMainWindow::onLoadDeviceLogError()
 {
     loadDeviceLog(2);
 }
 
+/* OTA 状态码转中文说明。 */
 QString DopplerMainWindow::otaStatusText(unsigned status)
 {
     switch (status) {
@@ -1075,6 +1119,7 @@ QString DopplerMainWindow::otaStatusText(unsigned status)
     }
 }
 
+/* OTA 错误码转中文说明。 */
 QString DopplerMainWindow::otaErrText(unsigned err)
 {
     switch (err) {
@@ -1091,6 +1136,7 @@ QString DopplerMainWindow::otaErrText(unsigned err)
     }
 }
 
+/* 刷新 OTA 进度/状态/徽章，并维护 UI 锁定。 */
 void DopplerMainWindow::updateOtaUi()
 {
     ota_ui_status_t st;
@@ -1196,6 +1242,7 @@ void DopplerMainWindow::updateOtaUi()
     setLabelTextIfChanged(m_lblOtaDetail, detail);
 }
 
+/* 导出设备日志并按过滤模式显示到文本框。 */
 void DopplerMainWindow::loadDeviceLog(int filterMode)
 {
     if (!m_bizOk) {
@@ -1248,6 +1295,7 @@ void DopplerMainWindow::loadDeviceLog(int filterMode)
     appendUiLog(QStringLiteral("已加载设备日志（%1）").arg(QString::fromUtf8(modeName)));
 }
 
+/* 返回首页。 */
 void DopplerMainWindow::onBackHome()
 {
     if (m_otaUiLocked)
@@ -1255,6 +1303,7 @@ void DopplerMainWindow::onBackHome()
     m_stack->setCurrentWidget(m_pageHome);
 }
 
+/* 触发加测：采一轮并请求上报。 */
 void DopplerMainWindow::onStartTest()
 {
     if (m_otaUiLocked || !m_bizOk)
@@ -1265,6 +1314,7 @@ void DopplerMainWindow::onStartTest()
                              QStringLiteral("已请求加测，采集有效后会自动上报。"));
 }
 
+/* 水位页数字键盘：向输入框追加一位。 */
 void DopplerMainWindow::onNumPadDigit()
 {
     QPushButton *btn = qobject_cast<QPushButton *>(sender());
@@ -1276,6 +1326,7 @@ void DopplerMainWindow::onNumPadDigit()
     m_editWaterCm->setText(m_editWaterCm->text() + btn->text());
 }
 
+/* 水位页数字键盘：退格删除一位。 */
 void DopplerMainWindow::onNumPadBackspace()
 {
     if (!m_editWaterCm)
@@ -1286,12 +1337,14 @@ void DopplerMainWindow::onNumPadBackspace()
     m_editWaterCm->setText(t);
 }
 
+/* 水位页数字键盘：清空输入。 */
 void DopplerMainWindow::onNumPadClear()
 {
     if (m_editWaterCm)
         m_editWaterCm->clear();
 }
 
+/* 应用水位加测：空输入用传感器水位，否则覆盖一次后恢复。 */
 void DopplerMainWindow::onApplyWaterCm()
 {
     if (m_otaUiLocked || !m_bizOk)
@@ -1332,6 +1385,7 @@ void DopplerMainWindow::onApplyWaterCm()
     onRefresh();
 }
 
+/* 读取 conf 全文到只读配置查看页。 */
 void DopplerMainWindow::loadConfigToViewer()
 {
     const QString path = configFilePath();
@@ -1360,6 +1414,7 @@ void DopplerMainWindow::loadConfigToViewer()
     m_cfgView->setPlainText(text);
 }
 
+/* 从 conf 文本中解析指定 key 的值。 */
 static QString confValueOf(const QString &text, const QString &key)
 {
     const QStringList lines = text.split(QChar('\n'));
@@ -1376,6 +1431,7 @@ static QString confValueOf(const QString &text, const QString &key)
     return QString();
 }
 
+/* 从 conf 填充站号/密码/间隔等可编辑字段。 */
 void DopplerMainWindow::loadEditableFieldsFromConf()
 {
     const QString path = configFilePath();
@@ -1395,6 +1451,7 @@ void DopplerMainWindow::loadEditableFieldsFromConf()
     m_editStationId->setFocus();
 }
 
+/* 将可编辑字段写回 conf；成功返回 true。 */
 bool DopplerMainWindow::writeEditableFieldsToConf()
 {
     const QString path = configFilePath();
@@ -1454,6 +1511,7 @@ bool DopplerMainWindow::writeEditableFieldsToConf()
     return ok;
 }
 
+/* 打开只读配置查看页。 */
 void DopplerMainWindow::onShowConfigPage()
 {
     if (m_otaUiLocked)
@@ -1462,6 +1520,7 @@ void DopplerMainWindow::onShowConfigPage()
     m_stack->setCurrentWidget(m_pageConfig);
 }
 
+/* 打开配置编辑页并加载当前值。 */
 void DopplerMainWindow::onShowConfigEditPage()
 {
     if (m_otaUiLocked || !m_bizOk)
@@ -1470,6 +1529,7 @@ void DopplerMainWindow::onShowConfigEditPage()
     m_stack->setCurrentWidget(m_pageConfigEdit);
 }
 
+/* 拦截触摸/点击：唤醒息屏并重置空闲计时。 */
 bool DopplerMainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     const QEvent::Type t = event->type();
@@ -1493,6 +1553,7 @@ bool DopplerMainWindow::eventFilter(QObject *watched, QEvent *event)
     return QMainWindow::eventFilter(watched, event);
 }
 
+/* 同步息屏遮罩尺寸到主窗口。 */
 void DopplerMainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
@@ -1500,6 +1561,7 @@ void DopplerMainWindow::resizeEvent(QResizeEvent *event)
         m_blankCover->setGeometry(rect());
 }
 
+/* 记录用户活动，重置息屏空闲计时器。 */
 void DopplerMainWindow::noteUserActivity()
 {
     m_idleSince.restart();
@@ -1507,6 +1569,7 @@ void DopplerMainWindow::noteUserActivity()
         wakeScreen();
 }
 
+/* 显示黑屏遮罩并调用硬件息屏。 */
 void DopplerMainWindow::blankScreen()
 {
     if (m_screenBlanked || m_otaUiLocked)
@@ -1520,6 +1583,7 @@ void DopplerMainWindow::blankScreen()
     }
 }
 
+/* 隐藏遮罩并硬件亮屏。 */
 void DopplerMainWindow::wakeScreen()
 {
     m_idleSince.restart();
@@ -1531,6 +1595,7 @@ void DopplerMainWindow::wakeScreen()
         m_blankCover->hide();
 }
 
+/* 设置息屏分钟数；可选写入 conf。 */
 void DopplerMainWindow::applyBlankMinutes(int minutes, bool save)
 {
     if (minutes < 1)
@@ -1553,6 +1618,7 @@ void DopplerMainWindow::applyBlankMinutes(int minutes, bool save)
     }
 }
 
+/* 刷新息屏分钟按钮选中样式。 */
 void DopplerMainWindow::refreshBlankMinuteButtons()
 {
     for (int i = 0; i < 5; ++i) {
@@ -1568,6 +1634,7 @@ void DopplerMainWindow::refreshBlankMinuteButtons()
     }
 }
 
+/* 从 conf 读取 ScreenBlankMinutes。 */
 int DopplerMainWindow::loadBlankMinutesFromConf() const
 {
     const QString path = configFilePath();
@@ -1598,6 +1665,7 @@ int DopplerMainWindow::loadBlankMinutesFromConf() const
     return 5;
 }
 
+/* 将息屏分钟以 UTF-8 安全方式写入 conf。 */
 bool DopplerMainWindow::saveBlankMinutesToConf(int minutes) const
 {
     const QString path = configFilePath();
@@ -1638,6 +1706,7 @@ bool DopplerMainWindow::saveBlankMinutesToConf(int minutes) const
     return ok;
 }
 
+/* 打开息屏设置页。 */
 void DopplerMainWindow::onShowBlankSettingsPage()
 {
     if (m_otaUiLocked)
@@ -1650,6 +1719,7 @@ void DopplerMainWindow::onShowBlankSettingsPage()
     m_stack->setCurrentWidget(m_pageBlankSettings);
 }
 
+/* 处理息屏分钟按钮点击并保存。 */
 void DopplerMainWindow::onBlankMinutesChosen()
 {
     QPushButton *btn = qobject_cast<QPushButton *>(sender());
@@ -1659,6 +1729,7 @@ void DopplerMainWindow::onBlankMinutesChosen()
     applyBlankMinutes(minutes, true);
 }
 
+/* 配置编辑：记录当前获得焦点的输入框。 */
 void DopplerMainWindow::onCfgFieldFocus()
 {
     QLineEdit *edit = qobject_cast<QLineEdit *>(sender());
@@ -1666,6 +1737,7 @@ void DopplerMainWindow::onCfgFieldFocus()
         m_cfgActiveEdit = edit;
 }
 
+/* 配置数字键盘：向当前字段追加数字。 */
 void DopplerMainWindow::onCfgNumDigit()
 {
     QPushButton *btn = qobject_cast<QPushButton *>(sender());
@@ -1674,6 +1746,7 @@ void DopplerMainWindow::onCfgNumDigit()
     m_cfgActiveEdit->setText(m_cfgActiveEdit->text() + btn->text());
 }
 
+/* 配置数字键盘：当前字段退格。 */
 void DopplerMainWindow::onCfgNumBackspace()
 {
     if (!m_cfgActiveEdit)
@@ -1684,12 +1757,14 @@ void DopplerMainWindow::onCfgNumBackspace()
     m_cfgActiveEdit->setText(t);
 }
 
+/* 配置数字键盘：清空当前字段。 */
 void DopplerMainWindow::onCfgNumClear()
 {
     if (m_cfgActiveEdit)
         m_cfgActiveEdit->clear();
 }
 
+/* 保存可编辑配置并热加载业务配置。 */
 void DopplerMainWindow::onSaveConfigFields()
 {
     if (!m_bizOk)
@@ -1729,6 +1804,7 @@ void DopplerMainWindow::onSaveConfigFields()
     onShowConfigPage();
 }
 
+/* 确认后重启设备。 */
 void DopplerMainWindow::onRebootDevice()
 {
     if (m_otaUiLocked)
@@ -1744,6 +1820,7 @@ void DopplerMainWindow::onRebootDevice()
     (void)system("reboot");
 }
 
+/* 业务初始化完成：更新就绪状态与日志。 */
 void DopplerMainWindow::onBusinessReady(int result)
 {
     if (result == 0) {
@@ -1758,6 +1835,7 @@ void DopplerMainWindow::onBusinessReady(int result)
     }
 }
 
+/* 启动 Doppler 业务（由 main 延迟单次触发）。 */
 void DopplerMainWindow::onStartBusiness()
 {
     appendUiLog(QStringLiteral("正在初始化串口 / 定时器 / 链路…"));
@@ -1765,6 +1843,7 @@ void DopplerMainWindow::onStartBusiness()
     onBusinessReady(rc);
 }
 
+/* 刷新首页业务/传感器/链路状态灯。 */
 void DopplerMainWindow::updateHomeStatus()
 {
     const bool bizOk = m_bizOk;
@@ -1779,9 +1858,10 @@ void DopplerMainWindow::updateHomeStatus()
 
     setStatusChip(m_lblStatBiz, QStringLiteral("业务"), bizOk);
     setStatusChip(m_lblStatSensor, QStringLiteral("传感器"), sensorReal);
-    setStatusChip(m_lblStatLink, QStringLiteral("链路"), linkOk);
+    setStatusChip(m_lblStatLink, QStringLiteral("4G"), linkOk);
 }
 
+/* 定时刷新时钟、时长、指标、断面、息屏与 OTA。 */
 void DopplerMainWindow::onRefresh()
 {
     setLabelTextIfChanged(m_lblClock,
@@ -1793,7 +1873,7 @@ void DopplerMainWindow::onRefresh()
     const int m = (sec % 3600) / 60;
     const int s = sec % 60;
     setLabelTextIfChanged(m_valUptime,
-                          QStringLiteral("%1:%2:%3")
+                          QStringLiteral("运行 %1:%2:%3")
                               .arg(h, 2, 10, QChar('0'))
                               .arg(m, 2, 10, QChar('0'))
                               .arg(s, 2, 10, QChar('0')));
@@ -1838,15 +1918,28 @@ void DopplerMainWindow::onRefresh()
         setLabelTextIfChanged(m_valWater, QStringLiteral("%1").arg(water, 0, 'f', 2));
         setLabelTextIfChanged(m_valSecFlow, QStringLiteral("%1").arg(secQ, 0, 'f', 3));
         setLabelTextIfChanged(m_valHourFlow, QStringLiteral("%1").arg(hourQ, 0, 'f', 1));
+
+        const double waterElev = static_cast<double>(snap.i32AvgWaterScaled) / 100.0;
+        if (m_sectionView)
+            m_sectionView->setLiveData(waterElev, true);
     } else {
         setLabelTextIfChanged(m_valVel1, QStringLiteral("--"));
         setLabelTextIfChanged(m_valVel2, QStringLiteral("--"));
         setLabelTextIfChanged(m_valWater, QStringLiteral("--"));
         setLabelTextIfChanged(m_valSecFlow, QStringLiteral("--"));
         setLabelTextIfChanged(m_valHourFlow, QStringLiteral("--"));
+        if (m_sectionView)
+            m_sectionView->setLiveData(0.0, false);
     }
+
+    float volt = 0.f;
+    if (Dam5213_GetVoltage(&volt) == SUCCESS && volt > 0.01f)
+        setLabelTextIfChanged(m_valVoltage, QStringLiteral("%1").arg(volt, 0, 'f', 2));
+    else
+        setLabelTextIfChanged(m_valVoltage, QStringLiteral("--"));
 }
 
+/* 手动触发传感器采集。 */
 void DopplerMainWindow::onCollect()
 {
     if (m_otaUiLocked || !m_bizOk)
@@ -1856,6 +1949,7 @@ void DopplerMainWindow::onCollect()
     onRefresh();
 }
 
+/* 手动触发数据上报。 */
 void DopplerMainWindow::onReport()
 {
     if (m_otaUiLocked || !m_bizOk)
@@ -1864,6 +1958,7 @@ void DopplerMainWindow::onReport()
     appendUiLog(QStringLiteral("已触发手动上报"));
 }
 
+/* 进入退出密码鉴权页。 */
 void DopplerMainWindow::onExit()
 {
     if (m_otaUiLocked) {
@@ -1881,6 +1976,7 @@ void DopplerMainWindow::onExit()
     m_stack->setCurrentWidget(m_pageExitAuth);
 }
 
+/* 退出密码键盘：追加数字。 */
 void DopplerMainWindow::onExitPwdDigit()
 {
     QPushButton *btn = qobject_cast<QPushButton *>(sender());
@@ -1891,6 +1987,7 @@ void DopplerMainWindow::onExitPwdDigit()
     m_editExitPwd->setText(m_editExitPwd->text() + btn->text());
 }
 
+/* 退出密码键盘：退格。 */
 void DopplerMainWindow::onExitPwdBackspace()
 {
     if (!m_editExitPwd)
@@ -1901,18 +1998,21 @@ void DopplerMainWindow::onExitPwdBackspace()
     m_editExitPwd->setText(t);
 }
 
+/* 退出密码键盘：清空。 */
 void DopplerMainWindow::onExitPwdClear()
 {
     if (m_editExitPwd)
         m_editExitPwd->clear();
 }
 
+/* 返回硬编码退出密码。 */
 QString DopplerMainWindow::exitPassword() const
 {
     /* 固定退出密码，不写 conf */
     return QStringLiteral("111111");
 }
 
+/* 校验退出密码，通过则退出程序。 */
 void DopplerMainWindow::onExitConfirm()
 {
     if (m_otaUiLocked)
@@ -1930,6 +2030,7 @@ void DopplerMainWindow::onExitConfirm()
     doExitProgram();
 }
 
+/* 关闭蜂鸣器并退出进程。 */
 void DopplerMainWindow::doExitProgram()
 {
     hide();

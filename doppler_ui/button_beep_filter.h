@@ -6,14 +6,16 @@
 
 class QEvent;
 
-/* Beep only when a QAbstractButton (or its child) is pressed. */
+/* 仅在 QAbstractButton（或其子控件）被按下时短蜂鸣。 */
 class ButtonBeepFilter : public QObject
 {
     Q_OBJECT
 public:
+    /* 安装到 QApplication 的全局按键蜂鸣过滤器。 */
     explicit ButtonBeepFilter(QObject *parent = 0);
 
 protected:
+    /* 拦截 MouseButtonPress/TouchBegin：若落在按钮上则短蜂鸣。 */
     bool eventFilter(QObject *watched, QEvent *event);
 
 private:

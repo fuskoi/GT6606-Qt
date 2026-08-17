@@ -15,6 +15,7 @@
 #define BOARD_HEIGHT 600
 #endif
 
+/* POSIX 信号回调：关蜂鸣后硬退出（业务线程可能挡住 Qt 正常退出）。 */
 static void onPosixSignal(int)
 {
     /* Detached business threads ignore Qt shutdown; hard-exit on Ctrl+C too. */
@@ -22,6 +23,7 @@ static void onPosixSignal(int)
     ::_exit(0);
 }
 
+/* 程序入口：装信号/编码/蜂鸣过滤，全屏显示主窗后延迟启动业务。 */
 int main(int argc, char *argv[])
 {
     signal(SIGINT, onPosixSignal);

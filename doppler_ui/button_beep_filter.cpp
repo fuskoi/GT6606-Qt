@@ -6,12 +6,14 @@
 #include <QEvent>
 #include <QWidget>
 
+/* 构造：初始化上次蜂鸣时间戳。 */
 ButtonBeepFilter::ButtonBeepFilter(QObject *parent)
     : QObject(parent)
     , m_lastPulseMs(0)
 {
 }
 
+/* 事件过滤：仅在按钮按下时蜂鸣，并做 80ms 防抖（触摸会合成鼠标事件）。 */
 bool ButtonBeepFilter::eventFilter(QObject *watched, QEvent *event)
 {
     const QEvent::Type t = event->type();
