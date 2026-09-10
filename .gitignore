@@ -1,0 +1,5 @@
+*.o
+moc_*.cpp
+Makefile
+nisha_gt6606
+nisha_gt6606.ota
