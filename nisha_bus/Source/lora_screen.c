@@ -655,6 +655,47 @@ int send_custom_state(uint16_t screen_id, uint16_t button_id,
     }
 }
 
+/* GT6606 用 Qt 液晶屏，不再走 LoRa 串口屏协议 */
+#ifdef BOARD_GT6606
+int serial_send_function(const uint8_t *data, size_t len)
+{
+    (void)data;
+    (void)len;
+    return -1;
+}
+
+void default_mode_send_depth_to_screen(float depth)
+{
+    (void)depth;
+}
+
+void default_mode_send_sediment_to_screen(float sediment)
+{
+    (void)sediment;
+}
+
+void VMM_mode_send_sediment_to_screen(float sediment, uint16_t label_id)
+{
+    (void)sediment;
+    (void)label_id;
+}
+
+void VDIM_mode_send_sediment_to_screen(float sediment)
+{
+    (void)sediment;
+}
+
+void manual_mode_send_depth_to_screen(float depth)
+{
+    (void)depth;
+}
+
+void send_sensor_state_to_screen(void)
+{
+}
+
+#else /* !BOARD_GT6606：原 LoRa 串口屏 */
+
 // 发送函数封装（用于串口）
 int serial_send_function(const uint8_t *data, size_t len)
 {
@@ -770,3 +811,5 @@ void send_sensor_state_to_screen(void)
     }
     ts_printf("\n");
 }
+
+#endif /* BOARD_GT6606 */

@@ -3,10 +3,15 @@
 #include <QTimer>
 #include "board_buzzer.h"
 #include "button_beep_filter.h"
+#include "screen_idle_filter.h"
 #include "nisha_mainwindow.h"
 
 #include <signal.h>
 #include <unistd.h>
+
+extern "C" {
+#include "config.h"
+}
 
 #ifndef BOARD_WIDTH
 #define BOARD_WIDTH 1024
@@ -47,6 +52,10 @@ int main(int argc, char *argv[])
     w.setFixedSize(BOARD_WIDTH, BOARD_HEIGHT);
     w.move(0, 0);
     app.processEvents();
+
+    ScreenIdleFilter *idle = new ScreenIdleFilter(&app);
+    idle->setIdleMinutes(Config_GetInt("ScreenIdleMinutes", 0));
+    app.installEventFilter(idle);
 
     QTimer::singleShot(50, &w, SLOT(onStartBusiness()));
 

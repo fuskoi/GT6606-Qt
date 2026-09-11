@@ -101,12 +101,20 @@ static void sim_tick_depth(void)
 {
     if (s_motorDir > 0) {
         s_depthMm += s_stepMm;
-        if (s_depthMm > 8000)
-            s_depthMm = 8000;
+        {
+            int maxMm = Config_GetMaxWaterDepthMm();
+            if (s_depthMm > maxMm)
+                s_depthMm = maxMm;
+        }
     } else if (s_motorDir < 0) {
         s_depthMm -= s_stepMm;
-        if (s_depthMm < 0)
-            s_depthMm = 0;
+        {
+            int minMm = Config_GetMinWaterDepthMm();
+            if (s_depthMm < minMm)
+                s_depthMm = minMm;
+            if (s_depthMm < 0)
+                s_depthMm = 0;
+        }
     }
     depth_sensor_info.depth = s_depthMm;
 }

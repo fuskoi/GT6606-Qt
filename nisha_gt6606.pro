@@ -25,7 +25,8 @@ SOURCES += \
     nisha_ui/depth_profile_view.cpp \
     nisha_ui/board_buzzer.cpp \
     nisha_ui/board_display.cpp \
-    nisha_ui/button_beep_filter.cpp
+    nisha_ui/button_beep_filter.cpp \
+    nisha_ui/screen_idle_filter.cpp
 
 HEADERS += \
     nisha/NishaApp.h \
@@ -33,7 +34,8 @@ HEADERS += \
     nisha_ui/depth_profile_view.h \
     nisha_ui/board_buzzer.h \
     nisha_ui/board_display.h \
-    nisha_ui/button_beep_filter.h
+    nisha_ui/button_beep_filter.h \
+    nisha_ui/screen_idle_filter.h
 
 SOURCES += \
     $$NISHA_ROOT/Source/config.c \

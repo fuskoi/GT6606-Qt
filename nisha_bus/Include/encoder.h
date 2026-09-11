@@ -50,22 +50,6 @@ int SubmitEncoderTask(int taskName);
 
 int process_encoder_data(BYTE *pBuffer);
 
-void carsystem_init_encodervaluecheck(uint8_t *recvBuffer);
-
-void carsystem_init_encodervaluecheck_timeout(void);
-
-void carsystem_init_encodercheck(uint8_t *cvBuffer);
-
-void carsystem_init_encodercheck_timeout(void);
-
-void carsys_backhome_encodervalue(uint8_t *recvBuffer);
-
-void carsys_backhome_encodervalue_timeout(void);
-
-void carsys_clearencoder_resetvalue(void);
-
-void carsys_clearencoder_resetvalue_timeout(void);
-
 #endif // !__ENCODER_H__
 
 

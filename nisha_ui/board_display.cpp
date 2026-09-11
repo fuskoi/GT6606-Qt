@@ -1,102 +1,55 @@
 #include "board_display.h"
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
+#include <QApplication>
+#include <QString>
+#include <QWidget>
 
-#include <linux/fb.h>
-#include <sys/ioctl.h>
+#ifndef BOARD_WIDTH
+#define BOARD_WIDTH 1024
+#endif
+#ifndef BOARD_HEIGHT
+#define BOARD_HEIGHT 600
+#endif
 
 namespace {
 
-/* 向指定路径写入文本（如 brightness / blank），成功返回 true。 */
-bool write_file(const char *path, const char *text)
-{
-    const int fd = ::open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    const size_t n = strlen(text);
-    const ssize_t w = ::write(fd, text, n);
-    ::close(fd);
-    return (w == (ssize_t)n);
-}
+QWidget *g_cover = 0;
+bool g_blanked = false;
 
-/* 遍历 /sys/class/backlight，on=1 设为最大亮度，on=0 写 0。 */
-bool try_backlight(int on)
+QWidget *ensureCover()
 {
-    DIR *dir = opendir("/sys/class/backlight");
-    if (!dir)
-        return false;
-
-    bool ok = false;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.')
-            continue;
-        char path[256];
-        char maxPath[256];
-        snprintf(path, sizeof(path), "/sys/class/backlight/%s/brightness", ent->d_name);
-        if (on) {
-            int maxv = 255;
-            snprintf(maxPath, sizeof(maxPath),
-                     "/sys/class/backlight/%s/max_brightness", ent->d_name);
-            FILE *fp = fopen(maxPath, "r");
-            if (fp) {
-                if (fscanf(fp, "%d", &maxv) != 1)
-                    maxv = 255;
-                fclose(fp);
-            }
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%d", maxv > 0 ? maxv : 255);
-            if (write_file(path, buf))
-                ok = true;
-        } else {
-            if (write_file(path, "0"))
-                ok = true;
-        }
+    if (!g_cover) {
+        g_cover = new QWidget(0, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+        g_cover->setObjectName(QStringLiteral("screenIdleCover"));
+        g_cover->setStyleSheet(QStringLiteral("background-color:#000000;"));
+        g_cover->setGeometry(0, 0, BOARD_WIDTH, BOARD_HEIGHT);
+        g_cover->setAttribute(Qt::WA_AcceptTouchEvents, true);
     }
-    closedir(dir);
-    return ok;
-}
-
-/* 通过 sysfs 控制 fb0 blank（1=灭，0=亮）。 */
-bool try_fb_sysfs(int blank)
-{
-    return write_file("/sys/class/graphics/fb0/blank", blank ? "1" : "0");
-}
-
-/* sysfs 失败时，用 FBIOBLANK ioctl 控制 /dev/fb0。 */
-bool try_fb_ioctl(int blank)
-{
-    const int fd = ::open("/dev/fb0", O_RDWR | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    const int arg = blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK;
-    const int ret = ioctl(fd, FBIOBLANK, arg);
-    ::close(fd);
-    return (ret == 0);
+    return g_cover;
 }
 
 } /* namespace */
 
 namespace BoardDisplay {
 
-/* 息屏：先关背光，再 blank framebuffer。 */
-void blank(void)
+bool isBlanked(void)
 {
-    (void)try_backlight(0);
-    if (!try_fb_sysfs(1))
-        (void)try_fb_ioctl(1);
+    return g_blanked;
 }
 
-/* 亮屏：先 unblank framebuffer，再开背光。 */
+void blank(void)
+{
+    QWidget *w = ensureCover();
+    w->show();
+    w->raise();
+    g_blanked = true;
+}
+
 void unblank(void)
 {
-    if (!try_fb_sysfs(0))
-        (void)try_fb_ioctl(0);
-    (void)try_backlight(1);
+    if (g_cover)
+        g_cover->hide();
+    g_blanked = false;
 }
 
 }

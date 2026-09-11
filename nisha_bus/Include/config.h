@@ -3,6 +3,7 @@
 // #include "src_uthash.h"
 #include <stdio.h>
 #include <strings.h>
+#include <stddef.h>
 
 #include "src_uthash.h"
 #define MAX_KEY_LEN 40
@@ -57,4 +58,47 @@ void delete_all(void);
  * @param 	 new_line [in/out], 参数意义
  */
 void modify_line(char *filename, int line_num, char *new_line);
+
+/**
+ * 读整型配置；键不存在或空则返回 default_val。
+ * 布尔开关可用：Config_GetInt("EnableManualLift", 1) != 0
+ */
+int Config_GetInt(const char *key, int default_val);
+
+/**
+ * 写整型配置：更新内存表并落盘 tyls.conf（改已有行或追加）。
+ * 成功返回 0，失败返回 -1。
+ */
+int Config_SetInt(const char *key, int value);
+
+/**
+ * 读字符串配置；键不存在则写入 default_val 到 out（可为空串）。
+ * out_size 含结尾 0；成功返回 0。
+ */
+int Config_GetString(const char *key, char *out, size_t out_size, const char *default_val);
+
+/**
+ * 写字符串配置：更新内存表并落盘 tyls.conf。
+ * 成功返回 0，失败返回 -1。
+ */
+int Config_SetString(const char *key, const char *value);
+
+/** 读浮点配置；键不存在或无法解析则返回 default_val。 */
+double Config_GetDouble(const char *key, double default_val);
+
+/** 写浮点配置（保留 3 位小数）并落盘。成功 0，失败 -1。 */
+int Config_SetDouble(const char *key, double value);
+
+/**
+ * 最大水深（毫米），来自 MaxWaterDepth（米），默认 8.0 m。
+ * 夹紧到 [0.5 m, 50 m]。
+ */
+int Config_GetMaxWaterDepthMm(void);
+
+/**
+ * 最小水深（毫米），来自 MinWaterDepth（米），默认 0.1 m。
+ * 用于定深下限与手动上升软停；保证小于最大水深。
+ */
+int Config_GetMinWaterDepthMm(void);
+
 #endif // __CONFIG_H__

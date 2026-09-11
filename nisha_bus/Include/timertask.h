@@ -39,7 +39,6 @@ void set_timer_interval();
 void timer_callback();
 void start_calibration_simulation();
 bool is_current_minute(int minute);
-bool is_current_hour_and_minute(int hour, int minute);
 int is_time_for_five_minute_mark(void);
 void get_current_time(struct timespec *time);
 

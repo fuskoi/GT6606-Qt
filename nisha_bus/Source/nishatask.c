@@ -1,4 +1,5 @@
 #include "nishatask.h"
+#include "config.h"
 
 #ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -6,6 +7,14 @@
 #ifndef max
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #endif
+
+/* 手动升降软限位：停电机并抱刹后清任务。 */
+static void NiShaUD_Manual_SoftStop(void)
+{
+    SubmitDcMotorTask(DC_MOTOR_STOP);
+    SubmitRelayModuleTask(NS_RELAY_MODULE_ENABLE_BREAK);
+    NiShaUD_clear_task();
+}
 nisha_task_info_t nisha_task_info = {
     .task_mode = SedimentUD_Mode_Default,
     .task_state = SedimentUD_IDLE,
@@ -415,6 +424,22 @@ void *NiShaUD_Task_Mode_Default(void *arg)
         LOG(LOG_ERROR, "Depth is too small: %dmm", dst_depth);
         NiShaUD_Task_Mode_Default_Stop_Task();
         return NULL;
+    }
+    {
+        int maxMm = Config_GetMaxWaterDepthMm();
+        int minMm = Config_GetMinWaterDepthMm();
+        if (dst_depth < minMm)
+        {
+            LOG(LOG_ERROR, "Depth below MinWaterDepth: %dmm < %dmm", dst_depth, minMm);
+            NiShaUD_Task_Mode_Default_Stop_Task();
+            return NULL;
+        }
+        if (dst_depth > maxMm)
+        {
+            LOG(LOG_ERROR, "Depth above MaxWaterDepth: %dmm > %dmm", dst_depth, maxMm);
+            NiShaUD_Task_Mode_Default_Stop_Task();
+            return NULL;
+        }
     }
 
     int cur_depth = 0; // 毫米
@@ -828,6 +853,21 @@ void *NiShaUD_Task_Mode_VMM_Measurement(void *arg)
     dst_depth[1] = get_mode_one_para_depth(2);
     dst_depth[2] = get_mode_one_para_depth(3);
     dst_depth[3] = get_mode_one_para_depth(4);
+    {
+        int maxMm = Config_GetMaxWaterDepthMm();
+        int minMm = Config_GetMinWaterDepthMm();
+        int i;
+        for (i = 0; i < 4; ++i) {
+            if (dst_depth[i] <= 0)
+                continue;
+            if (dst_depth[i] < minMm || dst_depth[i] > maxMm) {
+                LOG(LOG_ERROR, "VMM depth[%d]=%dmm out of range [%d,%d]",
+                    i + 1, dst_depth[i], minMm, maxMm);
+                NiShaUD_VMM_Mode_Stop_Task();
+                return NULL;
+            }
+        }
+    }
     // 把收到的深度从浅到深排序
     int point = filterAndSort(dst_depth, 4, 50, nisha_task_info.tolerance + 100);
     ts_printf("point=%d\n", point);
@@ -1307,6 +1347,16 @@ void *NiShaUD_Task_Mode_VDIM_Measurement(void *arg)
         LOG(LOG_ERROR, "Depth is too small or points are too close: %dmm, %dmm", depth_1, depth_2);
         NiShaUD_Task_Mode_VDIM_Stop_Task();
         return NULL;
+    }
+    {
+        int maxMm = Config_GetMaxWaterDepthMm();
+        int minMm = Config_GetMinWaterDepthMm();
+        if (depth_1 < minMm || depth_1 > maxMm || depth_2 < minMm || depth_2 > maxMm) {
+            LOG(LOG_ERROR, "VDIM depth out of range [%d,%d]: %dmm, %dmm",
+                minMm, maxMm, depth_1, depth_2);
+            NiShaUD_Task_Mode_VDIM_Stop_Task();
+            return NULL;
+        }
     }
     depth_A = min(depth_1, depth_2);
     depth_B = max(depth_1, depth_2);
@@ -2190,6 +2240,13 @@ void *NiShaUD_Task_Mode_Manual_Up(void *arg)
         ts_printf("Current Depth: %d mm\n", depth);
         default_mode_send_depth_to_screen(depth * 0.001f); // 发送深度到屏幕
         manual_mode_send_depth_to_screen(depth * 0.001f);  // 显示深度，单位m
+        /* 上升软限位：不低于 MinWaterDepth */
+        if (depth <= Config_GetMinWaterDepthMm())
+        {
+            LOG(LOG_INFO, "Manual up stop at min depth %dmm", depth);
+            NiShaUD_Manual_SoftStop();
+            return NULL;
+        }
         sleep_ms(200);
     }
     ts_printf("[NiShaUD_Task_Mode_Manual_Up] End\n");
@@ -2267,6 +2324,13 @@ void *NiShaUD_Task_Mode_Manual_Down(void *arg)
         ts_printf("Current Depth: %d mm\n", depth);
         default_mode_send_depth_to_screen(depth * 0.001f); // 发送深度到屏幕
         manual_mode_send_depth_to_screen(depth * 0.001f);  // 显示深度，单位m
+        /* 下降软限位：不超过 MaxWaterDepth */
+        if (depth >= Config_GetMaxWaterDepthMm())
+        {
+            LOG(LOG_INFO, "Manual down stop at max depth %dmm", depth);
+            NiShaUD_Manual_SoftStop();
+            return NULL;
+        }
         sleep_ms(200);
     }
     NiShaUD_clear_task();
@@ -2555,12 +2619,19 @@ void get_keep_depth_from_file(int *depth_mm)
 void init_nisha_default_keep_depth(void)
 {
     int depth_mm = 0;
+    int maxMm;
+    int minMm;
     // 从文件中读取深度
     get_keep_depth_from_file(&depth_mm);
-    if (depth_mm < 300)
+    minMm = Config_GetMinWaterDepthMm();
+    maxMm = Config_GetMaxWaterDepthMm();
+    if (depth_mm < minMm)
     {
-        // 如果深度不在合理范围内，设置为默认值
-        depth_mm = 500; // 默认深度500mm
+        depth_mm = (minMm > 500) ? minMm : 500;
+    }
+    if (depth_mm > maxMm)
+    {
+        depth_mm = maxMm;
     }
     set_default_mode_keep_depth(depth_mm);
 }

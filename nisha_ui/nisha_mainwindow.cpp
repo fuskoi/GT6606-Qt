@@ -1,11 +1,12 @@
 #include "nisha_mainwindow.h"
 #include "depth_profile_view.h"
 #include "board_buzzer.h"
-#include "board_display.h"
+#include "screen_idle_filter.h"
 
 #include <QApplication>
 #include <QDateTime>
 #include <QEvent>
+#include <QFile>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFrame>
@@ -18,11 +19,13 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector>
 #include <cstring>
+#include <cstdlib>
 #include <unistd.h>
 
 extern "C" {
@@ -34,6 +37,9 @@ extern "C" {
 #include "relay_module.h"
 #include "FirmwareVersion.h"
 #include "OtaUpgrade.h"
+#include "config.h"
+#include "SocketLink.h"
+#include "Common.h"
 }
 
 namespace {
@@ -56,20 +62,24 @@ void setDevChip(QLabel *lab, const QString &name, bool ok)
     setLabelTextIfChanged(lab, html);
 }
 
-void setOtaStep(QLabel *lab, bool done, bool active, const QString &text)
+void setOtaBadge(QLabel *lab, const QString &tone, const QString &text)
 {
     if (!lab)
         return;
-    const QString mark = done ? QStringLiteral("✓")
-                              : (active ? QStringLiteral("●") : QStringLiteral("○"));
-    const QString color = done ? QStringLiteral("#3dd68c")
-                               : (active ? QStringLiteral("#5eead4") : QStringLiteral("#64748b"));
-    const QString html = QStringLiteral(
-        "<span style=\"color:%1;font-size:20px;\">%2</span>&nbsp;%3")
-                             .arg(color, mark, text);
-    if (lab->text() == html)
+    if (lab->text() == text && lab->property("otaTone").toString() == tone)
         return;
-    lab->setText(html);
+    lab->setText(text);
+    lab->setProperty("otaTone", tone);
+    QString bg = QStringLiteral("#64748b");
+    if (tone == QStringLiteral("busy"))
+        bg = QStringLiteral("#0b7a7a");
+    else if (tone == QStringLiteral("ok"))
+        bg = QStringLiteral("#1a7f37");
+    else if (tone == QStringLiteral("fail"))
+        bg = QStringLiteral("#b42318");
+    lab->setStyleSheet(QStringLiteral(
+        "QLabel#otaBadge { color:#ffffff; background-color:%1; border-radius:8px;"
+        " padding:8px 18px; font-size:20px; font-weight:bold; }").arg(bg));
 }
 
 QPushButton *makeBtn(const QString &text, QWidget *parent)
@@ -83,14 +93,28 @@ QPushButton *makeBtn(const QString &text, QWidget *parent)
 QWidget *makeMetricBox(QWidget *parent, const QString &cap, QLabel **valOut)
 {
     QWidget *box = new QWidget(parent);
-    box->setStyleSheet(QStringLiteral("QWidget { background:#ffffff; border-radius:10px; }"));
+    box->setObjectName(QStringLiteral("metricBox"));
     QVBoxLayout *vl = new QVBoxLayout(box);
+    vl->setContentsMargins(14, 12, 14, 12);
+    vl->setSpacing(0);
+
     QLabel *c = new QLabel(cap, box);
     c->setObjectName(QStringLiteral("metricCap"));
+    c->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    QFrame *line = new QFrame(box);
+    line->setObjectName(QStringLiteral("metricSep"));
+    line->setFrameShape(QFrame::HLine);
+    line->setFixedHeight(1);
+
     QLabel *v = new QLabel(QStringLiteral("--"), box);
     v->setObjectName(QStringLiteral("metricVal"));
     v->setAlignment(Qt::AlignCenter);
+
     vl->addWidget(c);
+    vl->addSpacing(8);
+    vl->addWidget(line);
+    vl->addSpacing(10);
     vl->addWidget(v, 1);
     *valOut = v;
     return box;
@@ -107,13 +131,19 @@ NishaMainWindow::NishaMainWindow(QWidget *parent)
     , m_pageVmm(0)
     , m_pageVdim(0)
     , m_pageManual(0)
+    , m_pageMenu(0)
+    , m_pageScreenIdle(0)
     , m_pageLog(0)
+    , m_pageConf(0)
+    , m_pageConfEdit(0)
     , m_pageOta(0)
     , m_lblClock(0)
     , m_lblUptime(0)
     , m_lblMode(0)
     , m_lblState(0)
     , m_depthProfile(0)
+    , m_depthProfileManual(0)
+    , m_valDepthManual(0)
     , m_valDepth(0)
     , m_valSediment(0)
     , m_valKeepDepth(0)
@@ -121,6 +151,7 @@ NishaMainWindow::NishaMainWindow(QWidget *parent)
     , m_lblDevSediment(0)
     , m_lblDevMotor(0)
     , m_lblDevRelay(0)
+    , m_lblDev4G(0)
     , m_editDefaultDepth(0)
     , m_editVmm1(0)
     , m_editVmm2(0)
@@ -128,24 +159,32 @@ NishaMainWindow::NishaMainWindow(QWidget *parent)
     , m_editVmm4(0)
     , m_editVdimA(0)
     , m_editVdimB(0)
+    , m_editDog(0)
+    , m_editSim(0)
+    , m_editLift(0)
+    , m_editMaxDepth(0)
     , m_activeEdit(0)
+    , m_lblManualLimit(0)
     , m_btnBackOta(0)
     , m_lblOtaState(0)
     , m_lblOtaPercent(0)
-    , m_lblOtaWarn(0)
-    , m_lblOtaStep1(0)
-    , m_lblOtaStep2(0)
-    , m_lblOtaStep3(0)
+    , m_lblOtaBadge(0)
     , m_lblOtaDetail(0)
     , m_otaHero(0)
     , m_otaDetailCard(0)
     , m_otaProgress(0)
+    , m_btnScreenIdle()
     , m_log(0)
+    , m_confView(0)
     , m_timer(0)
     , m_bizOk(false)
     , m_otaWasBusy(false)
     , m_otaUiLocked(false)
 {
+    for (int i = 0; i < 5; ++i)
+        m_btnScreenIdle[i] = 0;
+    /* 先读 tyls.conf，供 EnableManualLift 等界面开关使用 */
+    (void)ReadConfig();
     buildUi();
     m_uptime.start();
     m_timer = new QTimer(this);
@@ -258,6 +297,12 @@ void NishaMainWindow::setActiveEdit(QLineEdit *edit)
 
 void NishaMainWindow::addNumPad(QVBoxLayout *lay, QWidget *parent)
 {
+    addNumPad(lay, parent, 0, 0);
+}
+
+void NishaMainWindow::addNumPad(QVBoxLayout *lay, QWidget *parent,
+                                QPushButton *extraBtn1, QPushButton *extraBtn2)
+{
     QGridLayout *pad = new QGridLayout();
     const char *keys[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "<-"};
     for (int i = 0; i < 12; ++i) {
@@ -272,9 +317,26 @@ void NishaMainWindow::addNumPad(QVBoxLayout *lay, QWidget *parent)
     }
     QPushButton *clr = makeBtn(QStringLiteral("清空"), parent);
     clr->setObjectName(QStringLiteral("secondary"));
+    clr->setMinimumHeight(48);
     connect(clr, SIGNAL(clicked()), this, SLOT(onNumPadClear()));
+
     lay->addLayout(pad);
-    lay->addWidget(clr);
+    if (extraBtn1 || extraBtn2) {
+        QHBoxLayout *footer = new QHBoxLayout();
+        footer->setSpacing(10);
+        footer->addWidget(clr, 1);
+        if (extraBtn1) {
+            extraBtn1->setMinimumHeight(48);
+            footer->addWidget(extraBtn1, 1);
+        }
+        if (extraBtn2) {
+            extraBtn2->setMinimumHeight(48);
+            footer->addWidget(extraBtn2, 1);
+        }
+        lay->addLayout(footer);
+    } else {
+        lay->addWidget(clr);
+    }
 }
 
 void NishaMainWindow::buildUi()
@@ -289,48 +351,84 @@ void NishaMainWindow::buildUi()
         "QPushButton:pressed { background:#1e4e8c; }"
         "QPushButton:disabled { background:#9aa8b8; }"
         "QPushButton#danger { background:#b42318; }"
+        "QPushButton#danger:pressed { background:#912018; }"
         "QPushButton#secondary { background:#4a5568; }"
+        "QPushButton#menuBtn { background:#1a1a1a; }"
+        "QPushButton#menuBtn:pressed { background:#000000; }"
+        "QPushButton#idleOn { background:#0b7a7a; }"
         "QLabel#title { font-size:28px; font-weight:bold; color:#0f2a44; }"
-        "QLabel#metricVal { font-size:36px; font-weight:bold; color:#0b4f6c; }"
-        "QLabel#metricCap { font-size:16px; color:#5a6a7a; }"
+        "QFrame#appTopBar {"
+        "  background-color:#ffffff; border:none; border-bottom:3px solid #0b7a7a;"
+        "  border-radius:0px;"
+        "}"
+        "QLabel#appBrand {"
+        "  color:#0f2a44; font-size:32px; font-weight:bold; background:transparent;"
+        "}"
+        "QLabel#appMeta {"
+        "  color:#5a6a7a; font-size:16px; background:transparent;"
+        "}"
+        "QWidget#metricBox { background:#ffffff; border:1px solid #d5dee8; border-radius:12px; }"
+        "QLabel#metricVal { font-size:36px; font-weight:bold; color:#0b4f6c; background:transparent; }"
+        "QLabel#metricCap { font-size:15px; font-weight:bold; color:#5a6a7a; background:transparent; }"
+        "QFrame#metricSep { background:#d5dee8; border:none; max-height:1px; }"
         "QTextEdit { background:#0f1720; color:#d7e2ec; font-family:monospace;"
         " font-size:14px; border-radius:8px; }"
-        "QWidget#otaPage { background-color:#0f1c24; }"
-        "QFrame#otaTopBar { background-color:#132833; border:none;"
-        " border-bottom:2px solid #1f4a52; }"
-        "QLabel#otaBrand { color:#e8f4f4; font-size:24px; font-weight:bold; }"
-        "QFrame#otaHero { background-color:#16303a; border:1px solid #24545c;"
-        " border-radius:16px; }"
-        "QLabel#otaPercent { color:#5eead4; font-size:104px; font-weight:bold; }"
-        "QLabel#otaState { color:#f1f5f9; font-size:26px; font-weight:bold; }"
-        "QLabel#otaWarn { color:#fbbf24; font-size:18px; font-weight:bold; }"
-        "QLabel#otaStep { color:#94a3b8; font-size:18px; }"
-        "QProgressBar#otaBar { border:none; border-radius:10px;"
-        " background:#0b1620; text-align:center; font-size:0px; }"
-        "QProgressBar#otaBar::chunk { background-color:#14b8a6; border-radius:10px; }"
-        "QFrame#otaDetailCard { background-color:#132833; border:1px solid #24545c;"
-        " border-radius:14px; }"
-        "QLabel#otaDetail { color:#94a3b8; font-size:17px; }"
-        "QPushButton#otaBack { background:#334155; color:#fff; border:none;"
-        " border-radius:10px; padding:12px 28px; font-size:18px; font-weight:bold; }"));
+        /* OTA 全屏页：单块面板，避免百分比与状态之间露底色缝 */
+        "QWidget#otaPage { background-color:#dfe8ee; }"
+        "QFrame#otaTopBar { background-color:#ffffff; border:none; border-bottom:3px solid #0b7a7a; }"
+        "QLabel#otaBrand { color:#102033; font-size:26px; font-weight:bold; background:transparent; }"
+        "QFrame#otaPanel {"
+        "  background-color:#ffffff; border:2px solid #c9d4df; border-radius:16px;"
+        "}"
+        "QWidget#otaPage QLabel { background:transparent; }"
+        "QLabel#otaPercent { color:#0b7a7a; font-size:96px; font-weight:bold; background:transparent; }"
+        "QLabel#otaState { color:#102033; font-size:28px; font-weight:bold; background:transparent; }"
+        "QLabel#otaBadge {"
+        "  color:#ffffff; background-color:#0b7a7a; border-radius:8px;"
+        "  padding:8px 18px; font-size:20px; font-weight:bold;"
+        "}"
+        "QProgressBar#otaBar {"
+        "  border:2px solid #9db0c0; border-radius:12px; background:#dce5ec;"
+        "  text-align:center; color:#102033; font-size:18px; font-weight:bold;"
+        "  min-height:28px;"
+        "}"
+        "QProgressBar#otaBar::chunk {"
+        "  background-color:#0b7a7a; border-radius:10px; margin:2px;"
+        "}"
+        "QLabel#otaDetail {"
+        "  color:#334155; font-size:18px; background:transparent;"
+        "}"
+        "QFrame#otaDivider { background-color:#d5dee6; max-height:1px; min-height:1px; border:none; }"
+        "QPushButton#backBtn { background:#4a5568; color:#fff; border:none;"
+        " border-radius:8px; padding:10px 20px; font-size:18px; font-weight:bold; }"));
 
     QVBoxLayout *rootLay = new QVBoxLayout(m_root);
-    rootLay->setContentsMargins(12, 10, 12, 10);
-    rootLay->setSpacing(8);
+    rootLay->setContentsMargins(0, 0, 0, 0);
+    rootLay->setSpacing(0);
 
-    QHBoxLayout *top = new QHBoxLayout();
-    QLabel *title = new QLabel(QStringLiteral("泥沙"), m_root);
-    title->setObjectName(QStringLiteral("title"));
-    m_lblClock = new QLabel(m_root);
-    m_lblUptime = new QLabel(m_root);
+    QFrame *topBar = new QFrame(m_root);
+    topBar->setObjectName(QStringLiteral("appTopBar"));
+    QHBoxLayout *top = new QHBoxLayout(topBar);
+    top->setContentsMargins(20, 14, 20, 14);
+    top->setSpacing(16);
+    QLabel *title = new QLabel(QStringLiteral("泥沙"), topBar);
+    title->setObjectName(QStringLiteral("appBrand"));
+    m_lblClock = new QLabel(topBar);
+    m_lblUptime = new QLabel(topBar);
+    m_lblClock->setObjectName(QStringLiteral("appMeta"));
+    m_lblUptime->setObjectName(QStringLiteral("appMeta"));
     top->addWidget(title, 1);
     top->addWidget(m_lblUptime);
-    top->addSpacing(12);
     top->addWidget(m_lblClock);
-    rootLay->addLayout(top);
+    rootLay->addWidget(topBar, 0);
 
-    m_stack = new QStackedWidget(m_root);
-    rootLay->addWidget(m_stack, 1);
+    QWidget *body = new QWidget(m_root);
+    QVBoxLayout *bodyLay = new QVBoxLayout(body);
+    bodyLay->setContentsMargins(12, 12, 12, 10);
+    bodyLay->setSpacing(8);
+    m_stack = new QStackedWidget(body);
+    bodyLay->addWidget(m_stack, 1);
+    rootLay->addWidget(body, 1);
 
     /* 首页 */
     m_pageHome = new QWidget(m_stack);
@@ -343,15 +441,25 @@ void NishaMainWindow::buildUi()
         m_lblState = new QLabel(m_pageHome);
         m_lblDevDepth = new QLabel(m_pageHome);
         m_lblDevSediment = new QLabel(m_pageHome);
-        m_lblDevMotor = new QLabel(m_pageHome);
-        m_lblDevRelay = new QLabel(m_pageHome);
+        m_lblDev4G = new QLabel(m_pageHome);
+        const bool showLiftDev = (Config_GetInt("EnableManualLift", 1) != 0);
+        if (showLiftDev) {
+            m_lblDevMotor = new QLabel(m_pageHome);
+            m_lblDevRelay = new QLabel(m_pageHome);
+        } else {
+            m_lblDevMotor = 0;
+            m_lblDevRelay = 0;
+        }
         statRow->addWidget(m_lblMode);
         statRow->addWidget(m_lblState);
         statRow->addStretch(1);
         statRow->addWidget(m_lblDevDepth);
         statRow->addWidget(m_lblDevSediment);
-        statRow->addWidget(m_lblDevMotor);
-        statRow->addWidget(m_lblDevRelay);
+        if (showLiftDev) {
+            statRow->addWidget(m_lblDevMotor);
+            statRow->addWidget(m_lblDevRelay);
+        }
+        statRow->addWidget(m_lblDev4G);
         homeLay->addLayout(statRow);
 
         QHBoxLayout *mainRow = new QHBoxLayout();
@@ -365,40 +473,42 @@ void NishaMainWindow::buildUi()
         metricCol->setMaximumWidth(300);
         QVBoxLayout *metricLay = new QVBoxLayout(metricCol);
         metricLay->setContentsMargins(0, 0, 0, 0);
-        metricLay->setSpacing(8);
+        metricLay->setSpacing(12);
         metricLay->addWidget(makeMetricBox(metricCol, QStringLiteral("当前深度 (m)"), &m_valDepth), 1);
         metricLay->addWidget(makeMetricBox(metricCol, QStringLiteral("泥沙浓度 (kg/m³)"), &m_valSediment), 1);
-        metricLay->addWidget(makeMetricBox(metricCol, QStringLiteral("保持深度 (m)"), &m_valKeepDepth), 1);
+        if (showLiftDev) {
+            metricLay->addWidget(makeMetricBox(metricCol, QStringLiteral("保持深度 (m)"), &m_valKeepDepth), 1);
+        } else {
+            m_valKeepDepth = 0;
+        }
         mainRow->addWidget(metricCol, 0);
         homeLay->addLayout(mainRow, 1);
 
         QGridLayout *nav = new QGridLayout();
-        QPushButton *bDef = makeBtn(QStringLiteral("默认定深"), m_pageHome);
-        QPushButton *bVmm = makeBtn(QStringLiteral("垂线混合"), m_pageHome);
-        QPushButton *bVdim = makeBtn(QStringLiteral("垂线积深"), m_pageHome);
-        QPushButton *bMan = makeBtn(QStringLiteral("手动升降"), m_pageHome);
-        QPushButton *bLog = makeBtn(QStringLiteral("运行日志"), m_pageHome);
-        bLog->setObjectName(QStringLiteral("secondary"));
-        QPushButton *bStop = makeBtn(QStringLiteral("停止任务"), m_pageHome);
-        bStop->setObjectName(QStringLiteral("danger"));
-        QPushButton *bExit = makeBtn(QStringLiteral("退出"), m_pageHome);
-        bExit->setObjectName(QStringLiteral("secondary"));
-        nav->addWidget(bDef, 0, 0);
-        nav->addWidget(bVmm, 0, 1);
-        nav->addWidget(bVdim, 0, 2);
-        nav->addWidget(bMan, 1, 0);
-        nav->addWidget(bLog, 1, 1);
-        nav->addWidget(bStop, 1, 2);
-        nav->addWidget(bExit, 2, 0, 1, 3);
+        nav->setSpacing(10);
+        QPushButton *bMenu = makeBtn(QStringLiteral("功能菜单"), m_pageHome);
+        bMenu->setObjectName(QStringLiteral("secondary"));
+        bMenu->setMinimumHeight(56);
+        if (showLiftDev) {
+            QPushButton *bDef = makeBtn(QStringLiteral("默认定深"), m_pageHome);
+            QPushButton *bVmm = makeBtn(QStringLiteral("垂线混合"), m_pageHome);
+            QPushButton *bVdim = makeBtn(QStringLiteral("垂线积深"), m_pageHome);
+            bDef->setMinimumHeight(64);
+            bVmm->setMinimumHeight(64);
+            bVdim->setMinimumHeight(64);
+            nav->addWidget(bDef, 0, 0);
+            nav->addWidget(bVmm, 0, 1);
+            nav->addWidget(bVdim, 0, 2);
+            nav->addWidget(bMenu, 1, 0, 1, 3);
+            connect(bDef, SIGNAL(clicked()), this, SLOT(onShowDefaultPage()));
+            connect(bVmm, SIGNAL(clicked()), this, SLOT(onShowVmmPage()));
+            connect(bVdim, SIGNAL(clicked()), this, SLOT(onShowVdimPage()));
+        } else {
+            nav->addWidget(bMenu, 0, 0);
+        }
         homeLay->addLayout(nav);
 
-        connect(bDef, SIGNAL(clicked()), this, SLOT(onShowDefaultPage()));
-        connect(bVmm, SIGNAL(clicked()), this, SLOT(onShowVmmPage()));
-        connect(bVdim, SIGNAL(clicked()), this, SLOT(onShowVdimPage()));
-        connect(bMan, SIGNAL(clicked()), this, SLOT(onShowManualPage()));
-        connect(bLog, SIGNAL(clicked()), this, SLOT(onShowLogPage()));
-        connect(bStop, SIGNAL(clicked()), this, SLOT(onStopTask()));
-        connect(bExit, SIGNAL(clicked()), this, SLOT(onExit()));
+        connect(bMenu, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
     }
 
     /* 默认定深 */
@@ -484,34 +594,180 @@ void NishaMainWindow::buildUi()
         connect(back, SIGNAL(clicked()), this, SLOT(onBackHome()));
     }
 
-    /* 手动 */
-    m_pageManual = new QWidget(m_stack);
-    {
-        QVBoxLayout *vl = new QVBoxLayout(m_pageManual);
-        QLabel *h = new QLabel(QStringLiteral("手动升降"), m_pageManual);
+    /* 手动（EnableManualLift=0 时不建页）：左侧实时剖面，右侧升降控制 */
+    if (Config_GetInt("EnableManualLift", 1) != 0) {
+        m_pageManual = new QWidget(m_stack);
+        QHBoxLayout *hl = new QHBoxLayout(m_pageManual);
+        hl->setContentsMargins(12, 10, 12, 10);
+        hl->setSpacing(12);
+
+        m_depthProfileManual = new DepthProfileView(m_pageManual);
+        m_depthProfileManual->setMinimumWidth(360);
+        hl->addWidget(m_depthProfileManual, 1);
+
+        QWidget *ctrl = new QWidget(m_pageManual);
+        ctrl->setMinimumWidth(280);
+        ctrl->setMaximumWidth(340);
+        QVBoxLayout *vl = new QVBoxLayout(ctrl);
+        vl->setContentsMargins(0, 0, 0, 0);
+        vl->setSpacing(10);
+
+        QLabel *h = new QLabel(QStringLiteral("手动升降"), ctrl);
         h->setObjectName(QStringLiteral("title"));
         vl->addWidget(h);
-        vl->addWidget(new QLabel(QStringLiteral("点按上升/下降，停止立即刹车。"), m_pageManual));
-        QHBoxLayout *row = new QHBoxLayout();
-        QPushButton *up = makeBtn(QStringLiteral("上升"), m_pageManual);
-        QPushButton *down = makeBtn(QStringLiteral("下降"), m_pageManual);
-        QPushButton *stop = makeBtn(QStringLiteral("停止"), m_pageManual);
+        vl->addWidget(new QLabel(QStringLiteral("点按上升/下降，停止立即刹车。"), ctrl));
+
+        m_lblManualLimit = new QLabel(ctrl);
+        m_lblManualLimit->setWordWrap(true);
+        m_lblManualLimit->setStyleSheet(QStringLiteral("color:#64748b; font-size:13px;"));
+        vl->addWidget(m_lblManualLimit);
+
+        QLabel *depthCap = new QLabel(QStringLiteral("当前深度 (m)"), ctrl);
+        depthCap->setStyleSheet(QStringLiteral("color:#64748b; font-size:14px;"));
+        vl->addWidget(depthCap);
+        m_valDepthManual = new QLabel(QStringLiteral("--"), ctrl);
+        m_valDepthManual->setAlignment(Qt::AlignCenter);
+        m_valDepthManual->setMinimumHeight(56);
+        m_valDepthManual->setStyleSheet(QStringLiteral(
+            "QLabel { font-size:28px; font-weight:600; background:#f4f7fb;"
+            " border:1px solid #c5d0dc; border-radius:8px; }"));
+        vl->addWidget(m_valDepthManual);
+
+        QPushButton *up = makeBtn(QStringLiteral("上升"), ctrl);
+        QPushButton *down = makeBtn(QStringLiteral("下降"), ctrl);
+        QPushButton *stop = makeBtn(QStringLiteral("停止"), ctrl);
         stop->setObjectName(QStringLiteral("danger"));
-        up->setMinimumHeight(80);
-        down->setMinimumHeight(80);
-        stop->setMinimumHeight(80);
-        row->addWidget(up);
-        row->addWidget(down);
-        row->addWidget(stop);
-        vl->addLayout(row);
-        QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageManual);
+        up->setMinimumHeight(72);
+        down->setMinimumHeight(72);
+        stop->setMinimumHeight(72);
+        vl->addWidget(up);
+        vl->addWidget(down);
+        vl->addWidget(stop);
+
+        QPushButton *back = makeBtn(QStringLiteral("返回"), ctrl);
         back->setObjectName(QStringLiteral("secondary"));
         vl->addWidget(back);
         vl->addStretch(1);
+
+        hl->addWidget(ctrl, 0);
+
         connect(up, SIGNAL(clicked()), this, SLOT(onManualUp()));
         connect(down, SIGNAL(clicked()), this, SLOT(onManualDown()));
         connect(stop, SIGNAL(clicked()), this, SLOT(onManualStop()));
+        connect(back, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
+    } else {
+        m_pageManual = 0;
+        m_depthProfileManual = 0;
+        m_valDepthManual = 0;
+    }
+
+    /* 功能菜单：黑按钮两列；重启/退出同行红色；底部返回首页 */
+    m_pageMenu = new QWidget(m_stack);
+    {
+        const bool manualLift = (Config_GetInt("EnableManualLift", 1) != 0);
+        QVBoxLayout *vl = new QVBoxLayout(m_pageMenu);
+        vl->setContentsMargins(24, 20, 24, 20);
+        vl->setSpacing(12);
+        QLabel *h = new QLabel(QStringLiteral("功能菜单"), m_pageMenu);
+        h->setObjectName(QStringLiteral("title"));
+        vl->addWidget(h);
+
+        QGridLayout *grid = new QGridLayout();
+        grid->setSpacing(12);
+        int row = 0;
+        if (manualLift) {
+            QPushButton *bMan = makeBtn(QStringLiteral("手动升降"), m_pageMenu);
+            bMan->setObjectName(QStringLiteral("menuBtn"));
+            bMan->setMinimumHeight(56);
+            grid->addWidget(bMan, row, 0, 1, 2);
+            connect(bMan, SIGNAL(clicked()), this, SLOT(onShowManualPage()));
+            row++;
+        }
+        QPushButton *bLog = makeBtn(QStringLiteral("运行日志"), m_pageMenu);
+        bLog->setObjectName(QStringLiteral("menuBtn"));
+        bLog->setMinimumHeight(56);
+        QPushButton *bIdle = makeBtn(QStringLiteral("息屏设置"), m_pageMenu);
+        bIdle->setObjectName(QStringLiteral("menuBtn"));
+        bIdle->setMinimumHeight(56);
+        grid->addWidget(bLog, row, 0);
+        grid->addWidget(bIdle, row, 1);
+        row++;
+        QPushButton *bConf = makeBtn(QStringLiteral("配置文件"), m_pageMenu);
+        bConf->setObjectName(QStringLiteral("menuBtn"));
+        bConf->setMinimumHeight(56);
+        QPushButton *bStop = makeBtn(QStringLiteral("停止任务"), m_pageMenu);
+        bStop->setObjectName(QStringLiteral("menuBtn"));
+        bStop->setMinimumHeight(56);
+        grid->addWidget(bConf, row, 0);
+        grid->addWidget(bStop, row, 1);
+        row++;
+        QPushButton *bReboot = makeBtn(QStringLiteral("重启设备"), m_pageMenu);
+        bReboot->setObjectName(QStringLiteral("danger"));
+        bReboot->setMinimumHeight(56);
+        QPushButton *bExit = makeBtn(QStringLiteral("退出"), m_pageMenu);
+        bExit->setObjectName(QStringLiteral("danger"));
+        bExit->setMinimumHeight(56);
+        grid->addWidget(bReboot, row, 0);
+        grid->addWidget(bExit, row, 1);
+        vl->addLayout(grid);
+
+        vl->addStretch(1);
+        QPushButton *back = makeBtn(QStringLiteral("返回首页"), m_pageMenu);
+        back->setObjectName(QStringLiteral("menuBtn"));
+        back->setMinimumHeight(52);
+        vl->addWidget(back);
+
+        connect(bLog, SIGNAL(clicked()), this, SLOT(onShowLogPage()));
+        connect(bIdle, SIGNAL(clicked()), this, SLOT(onShowScreenIdlePage()));
+        connect(bConf, SIGNAL(clicked()), this, SLOT(onShowConfPage()));
+        connect(bStop, SIGNAL(clicked()), this, SLOT(onStopTask()));
+        connect(bReboot, SIGNAL(clicked()), this, SLOT(onRebootDevice()));
+        connect(bExit, SIGNAL(clicked()), this, SLOT(onExit()));
         connect(back, SIGNAL(clicked()), this, SLOT(onBackHome()));
+    }
+
+    /* 息屏设置 */
+    m_pageScreenIdle = new QWidget(m_stack);
+    {
+        QVBoxLayout *vl = new QVBoxLayout(m_pageScreenIdle);
+        vl->setContentsMargins(24, 20, 24, 20);
+        vl->setSpacing(12);
+        QLabel *h = new QLabel(QStringLiteral("息屏设置"), m_pageScreenIdle);
+        h->setObjectName(QStringLiteral("title"));
+        vl->addWidget(h);
+        vl->addWidget(new QLabel(
+            QStringLiteral("无操作一段时间后黑屏，触摸任意处唤醒（不关背光）。"),
+            m_pageScreenIdle));
+
+        static const int minutes[] = {1, 3, 5, 10, 0};
+        QGridLayout *grid = new QGridLayout();
+        grid->setSpacing(12);
+        const QString labels[5] = {
+            QStringLiteral("1 分钟"),
+            QStringLiteral("3 分钟"),
+            QStringLiteral("5 分钟"),
+            QStringLiteral("10 分钟"),
+            QStringLiteral("不息屏")
+        };
+        for (int i = 0; i < 5; ++i) {
+            m_btnScreenIdle[i] = makeBtn(labels[i], m_pageScreenIdle);
+            m_btnScreenIdle[i]->setMinimumHeight(64);
+            m_btnScreenIdle[i]->setProperty("idleMinutes", minutes[i]);
+            connect(m_btnScreenIdle[i], SIGNAL(clicked()), this, SLOT(onScreenIdleChoice()));
+        }
+        grid->addWidget(m_btnScreenIdle[0], 0, 0);
+        grid->addWidget(m_btnScreenIdle[1], 0, 1);
+        grid->addWidget(m_btnScreenIdle[2], 1, 0);
+        grid->addWidget(m_btnScreenIdle[3], 1, 1);
+        grid->addWidget(m_btnScreenIdle[4], 2, 0, 1, 2);
+        vl->addLayout(grid);
+        vl->addStretch(1);
+        QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageScreenIdle);
+        back->setObjectName(QStringLiteral("secondary"));
+        back->setMinimumHeight(52);
+        vl->addWidget(back);
+        connect(back, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
+        refreshScreenIdleButtons();
     }
 
     /* 日志 */
@@ -527,99 +783,178 @@ void NishaMainWindow::buildUi()
         QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageLog);
         back->setObjectName(QStringLiteral("secondary"));
         vl->addWidget(back);
-        connect(back, SIGNAL(clicked()), this, SLOT(onBackHome()));
+        connect(back, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
     }
 
-    /* OTA 全屏进度页：网页下发固件时自动切入并锁定，无入口按钮 */
+    /* 配置文件（只读显示 tyls.conf） */
+    m_pageConf = new QWidget(m_stack);
+    {
+        QVBoxLayout *vl = new QVBoxLayout(m_pageConf);
+        vl->setContentsMargins(12, 10, 12, 10);
+        vl->setSpacing(10);
+
+        QHBoxLayout *top = new QHBoxLayout();
+        QLabel *h = new QLabel(QStringLiteral("配置文件"), m_pageConf);
+        h->setObjectName(QStringLiteral("title"));
+        QPushButton *bEdit = makeBtn(QStringLiteral("修改配置"), m_pageConf);
+        bEdit->setMinimumHeight(48);
+        bEdit->setMinimumWidth(140);
+        top->addWidget(h, 1);
+        top->addWidget(bEdit);
+        vl->addLayout(top);
+
+        m_confView = new QTextEdit(m_pageConf);
+        m_confView->setReadOnly(true);
+        vl->addWidget(m_confView, 1);
+        QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageConf);
+        back->setObjectName(QStringLiteral("secondary"));
+        vl->addWidget(back);
+        connect(bEdit, SIGNAL(clicked()), this, SLOT(onShowConfEditPage()));
+        connect(back, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
+    }
+
+    /* 修改配置：2×2 对齐排版；键盘下「清空|保存|返回」同行 */
+    m_pageConfEdit = new QWidget(m_stack);
+    {
+        QVBoxLayout *vl = new QVBoxLayout(m_pageConfEdit);
+        vl->setContentsMargins(16, 12, 16, 10);
+        vl->setSpacing(12);
+
+        QLabel *h = new QLabel(QStringLiteral("修改配置"), m_pageConfEdit);
+        h->setObjectName(QStringLiteral("title"));
+        vl->addWidget(h);
+        QLabel *hint = new QLabel(QStringLiteral("点选输入框后用下方键盘填写，保存写入 tyls.conf。"), m_pageConfEdit);
+        hint->setStyleSheet(QStringLiteral("color:#5a6a7a; font-size:15px;"));
+        vl->addWidget(hint);
+
+        QFrame *formCard = new QFrame(m_pageConfEdit);
+        formCard->setObjectName(QStringLiteral("metricBox"));
+        QGridLayout *grid = new QGridLayout(formCard);
+        grid->setContentsMargins(20, 18, 20, 18);
+        grid->setHorizontalSpacing(28);
+        grid->setVerticalSpacing(16);
+        grid->setColumnStretch(1, 1);
+        grid->setColumnStretch(3, 1);
+
+        const int labW = 120;
+        const int editH = 52;
+        auto placeField = [&](int r, int cLab, const QString &name,
+                              QLineEdit **editOut, const QString &placeholder) {
+            QLabel *lab = new QLabel(name, formCard);
+            lab->setFixedWidth(labW);
+            lab->setMinimumHeight(editH);
+            lab->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
+            lab->setStyleSheet(QStringLiteral(
+                "font-size:22px; font-weight:bold; color:#0f2a44; background:transparent;"));
+            QLineEdit *e = makeDepthEdit(formCard);
+            e->setPlaceholderText(placeholder);
+            e->setMinimumHeight(editH);
+            e->setMaximumHeight(editH);
+            e->setMinimumWidth(160);
+            e->setStyleSheet(QStringLiteral(
+                "QLineEdit { font-size:24px; font-weight:600; background:#f4f7fb;"
+                " border:1px solid #c5d0dc; border-radius:8px; padding:4px 10px; }"));
+            grid->addWidget(lab, r, cLab, Qt::AlignVCenter | Qt::AlignRight);
+            grid->addWidget(e, r, cLab + 1);
+            *editOut = e;
+        };
+
+        placeField(0, 0, QStringLiteral("看门狗"), &m_editDog, QStringLiteral("0/1"));
+        placeField(0, 2, QStringLiteral("模拟外设"), &m_editSim, QStringLiteral("0/1"));
+        placeField(1, 0, QStringLiteral("手动升降"), &m_editLift, QStringLiteral("0/1"));
+        placeField(1, 2, QStringLiteral("最大水深"), &m_editMaxDepth, QStringLiteral("米"));
+        vl->addWidget(formCard, 0);
+
+        QPushButton *save = makeBtn(QStringLiteral("保存"), m_pageConfEdit);
+        QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageConfEdit);
+        back->setObjectName(QStringLiteral("secondary"));
+
+        vl->addStretch(1);
+        addNumPad(vl, m_pageConfEdit, save, back);
+
+        connect(save, SIGNAL(clicked()), this, SLOT(onConfSave()));
+        connect(back, SIGNAL(clicked()), this, SLOT(onShowConfPage()));
+    }
+
+    /* OTA 全屏进度页（对齐多普勒：百分比 + 徽章 + 进度条 + 详情） */
     m_pageOta = new QWidget(m_stack);
     m_pageOta->setObjectName(QStringLiteral("otaPage"));
     {
         QFrame *otaTopBar = new QFrame(m_pageOta);
         otaTopBar->setObjectName(QStringLiteral("otaTopBar"));
-        QLabel *otaBrand = new QLabel(QStringLiteral("远程固件升级"), otaTopBar);
+        QLabel *otaBrand = new QLabel(QStringLiteral("固件升级"), otaTopBar);
         otaBrand->setObjectName(QStringLiteral("otaBrand"));
         m_btnBackOta = makeBtn(QStringLiteral("返回首页"), otaTopBar);
-        m_btnBackOta->setObjectName(QStringLiteral("otaBack"));
+        m_btnBackOta->setObjectName(QStringLiteral("backBtn"));
         connect(m_btnBackOta, SIGNAL(clicked()), this, SLOT(onBackHome()));
+        /* 升级中隐藏返回，结束后失败才允许离开 */
         m_btnBackOta->setVisible(false);
         QHBoxLayout *otaTop = new QHBoxLayout(otaTopBar);
-        otaTop->setContentsMargins(22, 14, 22, 14);
+        otaTop->setContentsMargins(18, 12, 18, 12);
         otaTop->setSpacing(12);
         otaTop->addWidget(otaBrand);
         otaTop->addStretch(1);
         otaTop->addWidget(m_btnBackOta);
 
         m_otaHero = new QFrame(m_pageOta);
-        m_otaHero->setObjectName(QStringLiteral("otaHero"));
+        m_otaHero->setObjectName(QStringLiteral("otaPanel"));
         m_lblOtaPercent = new QLabel(QStringLiteral("0%"), m_otaHero);
         m_lblOtaPercent->setObjectName(QStringLiteral("otaPercent"));
         m_lblOtaPercent->setAlignment(Qt::AlignCenter);
-        m_lblOtaState = new QLabel(QStringLiteral("准备接收固件"), m_otaHero);
+        m_lblOtaState = new QLabel(QStringLiteral("等待升级"), m_otaHero);
         m_lblOtaState->setObjectName(QStringLiteral("otaState"));
         m_lblOtaState->setAlignment(Qt::AlignCenter);
         m_lblOtaState->setWordWrap(true);
-
-        m_lblOtaStep1 = new QLabel(m_otaHero);
-        m_lblOtaStep1->setObjectName(QStringLiteral("otaStep"));
-        m_lblOtaStep1->setAlignment(Qt::AlignCenter);
-        m_lblOtaStep2 = new QLabel(m_otaHero);
-        m_lblOtaStep2->setObjectName(QStringLiteral("otaStep"));
-        m_lblOtaStep2->setAlignment(Qt::AlignCenter);
-        m_lblOtaStep3 = new QLabel(m_otaHero);
-        m_lblOtaStep3->setObjectName(QStringLiteral("otaStep"));
-        m_lblOtaStep3->setAlignment(Qt::AlignCenter);
-        setOtaStep(m_lblOtaStep1, false, false, QStringLiteral("接收"));
-        setOtaStep(m_lblOtaStep2, false, false, QStringLiteral("校验"));
-        setOtaStep(m_lblOtaStep3, false, false, QStringLiteral("重启"));
-        QHBoxLayout *stepRow = new QHBoxLayout();
-        stepRow->setSpacing(28);
-        stepRow->addStretch(1);
-        stepRow->addWidget(m_lblOtaStep1);
-        stepRow->addWidget(m_lblOtaStep2);
-        stepRow->addWidget(m_lblOtaStep3);
-        stepRow->addStretch(1);
-
+        m_lblOtaBadge = new QLabel(QStringLiteral("空闲"), m_otaHero);
+        m_lblOtaBadge->setObjectName(QStringLiteral("otaBadge"));
+        m_lblOtaBadge->setAlignment(Qt::AlignCenter);
+        m_lblOtaBadge->setProperty("otaTone", QStringLiteral("idle"));
+        m_lblOtaBadge->setMinimumWidth(160);
+        setOtaBadge(m_lblOtaBadge, QStringLiteral("idle"), QStringLiteral("空闲"));
         m_otaProgress = new QProgressBar(m_otaHero);
         m_otaProgress->setObjectName(QStringLiteral("otaBar"));
         m_otaProgress->setRange(0, 100);
         m_otaProgress->setValue(0);
-        m_otaProgress->setTextVisible(false);
-        m_otaProgress->setMinimumHeight(18);
-        m_otaProgress->setMaximumHeight(18);
+        m_otaProgress->setTextVisible(true);
+        m_otaProgress->setFormat(QStringLiteral("%p%"));
+        m_otaProgress->setMinimumHeight(36);
 
-        m_lblOtaWarn = new QLabel(QStringLiteral("升级过程中请勿断电或退出"), m_otaHero);
-        m_lblOtaWarn->setObjectName(QStringLiteral("otaWarn"));
-        m_lblOtaWarn->setAlignment(Qt::AlignCenter);
+        QFrame *divider = new QFrame(m_otaHero);
+        divider->setObjectName(QStringLiteral("otaDivider"));
+        divider->setFrameShape(QFrame::NoFrame);
 
-        QVBoxLayout *heroLay = new QVBoxLayout(m_otaHero);
-        heroLay->setContentsMargins(28, 28, 28, 24);
-        heroLay->setSpacing(12);
-        heroLay->addStretch(1);
-        heroLay->addWidget(m_lblOtaPercent);
-        heroLay->addWidget(m_lblOtaState);
-        heroLay->addSpacing(6);
-        heroLay->addLayout(stepRow);
-        heroLay->addSpacing(10);
-        heroLay->addWidget(m_otaProgress);
-        heroLay->addSpacing(8);
-        heroLay->addWidget(m_lblOtaWarn);
-        heroLay->addStretch(1);
-
-        m_otaDetailCard = new QFrame(m_pageOta);
-        m_otaDetailCard->setObjectName(QStringLiteral("otaDetailCard"));
-        m_lblOtaDetail = new QLabel(QStringLiteral(""), m_otaDetailCard);
+        m_otaDetailCard = 0;
+        m_lblOtaDetail = new QLabel(QStringLiteral("等待网页下发固件…"), m_otaHero);
         m_lblOtaDetail->setObjectName(QStringLiteral("otaDetail"));
         m_lblOtaDetail->setWordWrap(true);
-        m_lblOtaDetail->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        QVBoxLayout *detailLay = new QVBoxLayout(m_otaDetailCard);
-        detailLay->setContentsMargins(22, 16, 22, 16);
-        detailLay->addWidget(m_lblOtaDetail);
+        m_lblOtaDetail->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+
+        QHBoxLayout *badgeRow = new QHBoxLayout();
+        badgeRow->setContentsMargins(0, 0, 0, 0);
+        badgeRow->setSpacing(0);
+        badgeRow->addStretch(1);
+        badgeRow->addWidget(m_lblOtaBadge);
+        badgeRow->addStretch(1);
+
+        QVBoxLayout *panelLay = new QVBoxLayout(m_otaHero);
+        panelLay->setContentsMargins(28, 22, 28, 22);
+        panelLay->setSpacing(8);
+        panelLay->addStretch(1);
+        panelLay->addWidget(m_lblOtaPercent);
+        panelLay->addWidget(m_lblOtaState);
+        panelLay->addLayout(badgeRow);
+        panelLay->addSpacing(6);
+        panelLay->addWidget(m_otaProgress);
+        panelLay->addSpacing(10);
+        panelLay->addWidget(divider);
+        panelLay->addSpacing(10);
+        panelLay->addWidget(m_lblOtaDetail, 0);
+        panelLay->addStretch(1);
 
         QVBoxLayout *otaBody = new QVBoxLayout;
-        otaBody->setContentsMargins(24, 18, 24, 20);
-        otaBody->setSpacing(14);
+        otaBody->setContentsMargins(20, 16, 20, 20);
+        otaBody->setSpacing(0);
         otaBody->addWidget(m_otaHero, 1);
-        otaBody->addWidget(m_otaDetailCard, 0);
 
         QVBoxLayout *otaLay = new QVBoxLayout(m_pageOta);
         otaLay->setContentsMargins(0, 0, 0, 0);
@@ -632,8 +967,13 @@ void NishaMainWindow::buildUi()
     m_stack->addWidget(m_pageDefault);
     m_stack->addWidget(m_pageVmm);
     m_stack->addWidget(m_pageVdim);
-    m_stack->addWidget(m_pageManual);
+    if (m_pageManual)
+        m_stack->addWidget(m_pageManual);
+    m_stack->addWidget(m_pageMenu);
+    m_stack->addWidget(m_pageScreenIdle);
     m_stack->addWidget(m_pageLog);
+    m_stack->addWidget(m_pageConf);
+    m_stack->addWidget(m_pageConfEdit);
     m_stack->addWidget(m_pageOta);
 }
 
@@ -654,6 +994,14 @@ bool NishaMainWindow::eventFilter(QObject *watched, QEvent *event)
             setActiveEdit(m_editVdimA);
         else if (watched == m_editVdimB)
             setActiveEdit(m_editVdimB);
+        else if (watched == m_editDog)
+            setActiveEdit(m_editDog);
+        else if (watched == m_editSim)
+            setActiveEdit(m_editSim);
+        else if (watched == m_editLift)
+            setActiveEdit(m_editLift);
+        else if (watched == m_editMaxDepth)
+            setActiveEdit(m_editMaxDepth);
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -729,26 +1077,38 @@ void NishaMainWindow::onRefresh()
     const bool depthOk = is_depth_sensor_online();
     const double depthM = get_depth_sensor_depth() / 1000.0;
     setLabelTextIfChanged(m_valDepth, QString::number(depthM, 'f', 3));
+    if (m_valDepthManual)
+        setLabelTextIfChanged(m_valDepthManual,
+                              depthOk ? QString::number(depthM, 'f', 3) : QStringLiteral("--"));
 
-    float sed = g_sediment_data_average;
-    if (sed <= 0.0f && sediment_sensor_info.sediment_value > 0.0f)
+    /* 在线优先显示瞬时浓度；平均浓度仍留给测量/上报（满 50 点才更新） */
+    float sed = 0.0f;
+    if (is_sediment_sensor_online()) {
         sed = sediment_fill_milli_look(sediment_sensor_info.sediment_value);
-    setLabelTextIfChanged(m_valSediment, QString::number(sed, 'f', 3));
+        setLabelTextIfChanged(m_valSediment, QString::number(sed, 'f', 3));
+    } else if (g_sediment_data_average > 0.0f) {
+        sed = g_sediment_data_average;
+        setLabelTextIfChanged(m_valSediment, QString::number(sed, 'f', 3));
+    } else {
+        setLabelTextIfChanged(m_valSediment, QStringLiteral("--"));
+    }
 
+    const bool showLift = (Config_GetInt("EnableManualLift", 1) != 0);
     const int keepMm = get_default_mode_keep_depth();
-    const bool keepOk = keepMm > 0;
+    const bool keepOk = showLift && keepMm > 0;
     const double keepM = keepMm / 1000.0;
-    setLabelTextIfChanged(m_valKeepDepth, QString::number(keepM, 'f', 3));
+    if (m_valKeepDepth)
+        setLabelTextIfChanged(m_valKeepDepth, QString::number(keepM, 'f', 3));
 
     QVector<double> targets;
     const int mode = get_nisha_task_mode();
-    if (mode == SedimentUD_Mode_VMM_Measurement) {
+    if (showLift && mode == SedimentUD_Mode_VMM_Measurement) {
         for (int i = 1; i <= 4; ++i) {
             const int mm = get_mode_one_para_depth(i);
             if (mm > 0)
                 targets.append(mm / 1000.0);
         }
-    } else if (mode == SedimentUD_Mode_VDIM_Measurement) {
+    } else if (showLift && mode == SedimentUD_Mode_VDIM_Measurement) {
         for (int i = 1; i <= 2; ++i) {
             const int mm = get_mode_two_para_depth(i);
             if (mm > 0)
@@ -756,12 +1116,27 @@ void NishaMainWindow::onRefresh()
         }
     }
     if (m_depthProfile)
-        m_depthProfile->setLiveData(depthM, depthOk, keepM, keepOk, (double)sed, targets);
+        m_depthProfile->setLiveData(depthM, depthOk, keepM, keepOk, (double)sed, targets,
+                                    Config_GetMaxWaterDepthMm() / 1000.0);
+    if (m_depthProfileManual)
+        m_depthProfileManual->setLiveData(depthM, depthOk, keepM, keepOk, (double)sed, targets,
+                                          Config_GetMaxWaterDepthMm() / 1000.0);
+    if (m_lblManualLimit) {
+        const double minM = Config_GetMinWaterDepthMm() / 1000.0;
+        const double maxM = Config_GetMaxWaterDepthMm() / 1000.0;
+        setLabelTextIfChanged(m_lblManualLimit,
+                              QStringLiteral("软限位：最高升至 %1 m，最低降至 %2 m")
+                                  .arg(minM, 0, 'f', 2).arg(maxM, 0, 'f', 2));
+    }
 
     setDevChip(m_lblDevDepth, QStringLiteral("深度"), depthOk);
     setDevChip(m_lblDevSediment, QStringLiteral("泥沙"), is_sediment_sensor_online());
-    setDevChip(m_lblDevMotor, QStringLiteral("电机"), is_dc_motor_online());
-    setDevChip(m_lblDevRelay, QStringLiteral("继电器"), isRelayModuleOnline());
+    if (m_lblDevMotor)
+        setDevChip(m_lblDevMotor, QStringLiteral("电机"), is_dc_motor_online());
+    if (m_lblDevRelay)
+        setDevChip(m_lblDevRelay, QStringLiteral("继电器"), isRelayModuleOnline());
+    if (m_lblDev4G)
+        setDevChip(m_lblDev4G, QStringLiteral("4G"), WebLink_IsReady() != 0);
 }
 
 void NishaMainWindow::onBackHome()
@@ -774,7 +1149,7 @@ void NishaMainWindow::onBackHome()
 
 void NishaMainWindow::onShowDefaultPage()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || Config_GetInt("EnableManualLift", 1) == 0)
         return;
     const int keep = get_default_mode_keep_depth();
     if (keep > 0)
@@ -785,7 +1160,7 @@ void NishaMainWindow::onShowDefaultPage()
 
 void NishaMainWindow::onShowVmmPage()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || Config_GetInt("EnableManualLift", 1) == 0)
         return;
     setActiveEdit(m_editVmm1);
     m_stack->setCurrentWidget(m_pageVmm);
@@ -793,7 +1168,7 @@ void NishaMainWindow::onShowVmmPage()
 
 void NishaMainWindow::onShowVdimPage()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || Config_GetInt("EnableManualLift", 1) == 0)
         return;
     setActiveEdit(m_editVdimA);
     m_stack->setCurrentWidget(m_pageVdim);
@@ -801,9 +1176,64 @@ void NishaMainWindow::onShowVdimPage()
 
 void NishaMainWindow::onShowManualPage()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || !m_pageManual)
         return;
     m_stack->setCurrentWidget(m_pageManual);
+}
+
+void NishaMainWindow::onShowMenuPage()
+{
+    if (m_otaUiLocked)
+        return;
+    m_stack->setCurrentWidget(m_pageMenu);
+}
+
+void NishaMainWindow::onShowScreenIdlePage()
+{
+    if (m_otaUiLocked)
+        return;
+    refreshScreenIdleButtons();
+    m_stack->setCurrentWidget(m_pageScreenIdle);
+}
+
+void NishaMainWindow::refreshScreenIdleButtons()
+{
+    const int cur = Config_GetInt("ScreenIdleMinutes", 0);
+    for (int i = 0; i < 5; ++i) {
+        if (!m_btnScreenIdle[i])
+            continue;
+        const int mins = m_btnScreenIdle[i]->property("idleMinutes").toInt();
+        if (mins == cur)
+            m_btnScreenIdle[i]->setObjectName(QStringLiteral("idleOn"));
+        else
+            m_btnScreenIdle[i]->setObjectName(QString());
+        m_btnScreenIdle[i]->style()->unpolish(m_btnScreenIdle[i]);
+        m_btnScreenIdle[i]->style()->polish(m_btnScreenIdle[i]);
+        m_btnScreenIdle[i]->update();
+    }
+}
+
+void NishaMainWindow::onScreenIdleChoice()
+{
+    if (m_otaUiLocked)
+        return;
+    QPushButton *btn = qobject_cast<QPushButton *>(sender());
+    if (!btn)
+        return;
+    const int mins = btn->property("idleMinutes").toInt();
+    if (Config_SetInt("ScreenIdleMinutes", mins) != 0) {
+        appendUiLog(QStringLiteral("息屏设置保存失败"));
+        QMessageBox::warning(this, QStringLiteral("息屏设置"),
+                             QStringLiteral("写入配置文件失败。"));
+        return;
+    }
+    if (ScreenIdleFilter::instance())
+        ScreenIdleFilter::instance()->setIdleMinutes(mins);
+    refreshScreenIdleButtons();
+    if (mins <= 0)
+        appendUiLog(QStringLiteral("息屏：已关闭"));
+    else
+        appendUiLog(QStringLiteral("息屏：%1 分钟").arg(mins));
 }
 
 void NishaMainWindow::onShowLogPage()
@@ -813,13 +1243,146 @@ void NishaMainWindow::onShowLogPage()
     m_stack->setCurrentWidget(m_pageLog);
 }
 
+void NishaMainWindow::loadConfView()
+{
+    if (!m_confView)
+        return;
+
+    char appDir[MAX_PATH];
+    QString path;
+    memset(appDir, 0, sizeof(appDir));
+    if (GetAppDir(appDir))
+        path = QString::fromLocal8Bit(appDir) + QStringLiteral("/tyls.conf");
+    else
+        path = QStringLiteral("tyls.conf");
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_confView->setPlainText(QStringLiteral("无法打开配置文件：\n%1").arg(path));
+        return;
+    }
+    const QByteArray raw = f.readAll();
+    f.close();
+    m_confView->setPlainText(QString::fromUtf8(raw));
+}
+
+void NishaMainWindow::onShowConfPage()
+{
+    if (m_otaUiLocked)
+        return;
+    loadConfView();
+    m_stack->setCurrentWidget(m_pageConf);
+}
+
+void NishaMainWindow::loadConfEditForm()
+{
+    if (m_editDog)
+        m_editDog->setText(QString::number(Config_GetInt("DOG", 0) ? 1 : 0));
+    if (m_editSim)
+        m_editSim->setText(QString::number(Config_GetInt("SimMissingDevices", 0) ? 1 : 0));
+    if (m_editLift)
+        m_editLift->setText(QString::number(Config_GetInt("EnableManualLift", 1) ? 1 : 0));
+    if (m_editMaxDepth)
+        m_editMaxDepth->setText(QString::number(Config_GetMaxWaterDepthMm() / 1000.0, 'f', 3));
+    setActiveEdit(m_editDog ? m_editDog : m_editMaxDepth);
+}
+
+void NishaMainWindow::onShowConfEditPage()
+{
+    if (m_otaUiLocked)
+        return;
+    loadConfEditForm();
+    m_stack->setCurrentWidget(m_pageConfEdit);
+}
+
+bool NishaMainWindow::parse01Field(const QString &text, int *out, const QString &name, QString *err) const
+{
+    bool ok = false;
+    const int v = text.trimmed().toInt(&ok);
+    if (!ok || (v != 0 && v != 1)) {
+        if (err)
+            *err = QStringLiteral("%1 只能填 0 或 1。").arg(name);
+        return false;
+    }
+    if (out)
+        *out = v;
+    return true;
+}
+
+bool NishaMainWindow::parseDepthMeters(const QString &text, double *outMeters, QString *err) const
+{
+    bool ok = false;
+    const double meters = text.trimmed().toDouble(&ok);
+    const double minM = Config_GetMinWaterDepthMm() / 1000.0;
+    const double maxM = Config_GetMaxWaterDepthMm() / 1000.0;
+    if (!ok || meters < minM || meters > maxM) {
+        if (err) {
+            *err = QStringLiteral("请输入有效深度（米），范围 %1～%2。")
+                       .arg(minM, 0, 'f', 2).arg(maxM, 0, 'f', 2);
+        }
+        return false;
+    }
+    if (outMeters)
+        *outMeters = meters;
+    return true;
+}
+
+void NishaMainWindow::onConfSave()
+{
+    if (m_otaUiLocked)
+        return;
+
+    int dog = 0, sim = 0, lift = 0;
+    QString err;
+    if (!parse01Field(m_editDog ? m_editDog->text() : QString(), &dog,
+                      QStringLiteral("DOG"), &err)
+            || !parse01Field(m_editSim ? m_editSim->text() : QString(), &sim,
+                             QStringLiteral("SimMissingDevices"), &err)
+            || !parse01Field(m_editLift ? m_editLift->text() : QString(), &lift,
+                             QStringLiteral("EnableManualLift"), &err)) {
+        QMessageBox::warning(this, QStringLiteral("修改配置"), err);
+        return;
+    }
+
+    bool okMax = false;
+    const double maxM = m_editMaxDepth ? m_editMaxDepth->text().trimmed().toDouble(&okMax) : 0.0;
+    if (!okMax || maxM < 0.5 || maxM > 50.0) {
+        QMessageBox::warning(this, QStringLiteral("修改配置"),
+                             QStringLiteral("最大水深须在 0.5～50 米之间。"));
+        return;
+    }
+    const double minM = Config_GetDouble("MinWaterDepth", 0.1);
+    if (maxM <= minM + 0.2) {
+        QMessageBox::warning(this, QStringLiteral("修改配置"),
+                             QStringLiteral("最大水深须明显大于最小水深（当前 Min=%1 m）。")
+                                 .arg(minM, 0, 'f', 2));
+        return;
+    }
+
+    if (Config_SetInt("DOG", dog) != 0
+            || Config_SetInt("SimMissingDevices", sim) != 0
+            || Config_SetInt("EnableManualLift", lift) != 0
+            || Config_SetDouble("MaxWaterDepth", maxM) != 0) {
+        QMessageBox::warning(this, QStringLiteral("修改配置"),
+                             QStringLiteral("写入 tyls.conf 失败。"));
+        return;
+    }
+
+    appendUiLog(QStringLiteral("配置已保存 DOG=%1 Sim=%2 Lift=%3 MaxDepth=%4m")
+                    .arg(dog).arg(sim).arg(lift).arg(maxM, 0, 'f', 3));
+    QMessageBox::information(this, QStringLiteral("修改配置"),
+                             QStringLiteral("已写入配置文件。\n"
+                                            "最大水深立即生效；模拟外设 / 手动升降入口等需重启后完全生效。"));
+    loadConfView();
+    m_stack->setCurrentWidget(m_pageConf);
+}
+
 void NishaMainWindow::setOtaUiLocked(bool locked)
 {
     if (m_otaUiLocked == locked)
         return;
     m_otaUiLocked = locked;
     if (m_btnBackOta) {
-        /* 升级中隐藏返回；失败解锁后才可回首页 */
         m_btnBackOta->setVisible(!locked);
         m_btnBackOta->setEnabled(!locked);
     }
@@ -833,11 +1396,11 @@ QString NishaMainWindow::otaStatusText(unsigned status)
 {
     switch (status) {
     case OTA_STATUS_IDLE: return QStringLiteral("空闲");
-    case OTA_STATUS_RECEIVING: return QStringLiteral("正在接收固件");
-    case OTA_STATUS_APPLYING: return QStringLiteral("正在校验并切换固件");
-    case OTA_STATUS_OK: return QStringLiteral("升级完成，即将重启");
-    case OTA_STATUS_ERROR: return QStringLiteral("升级失败");
-    default: return QStringLiteral("状态异常 (%1)").arg(status);
+    case OTA_STATUS_RECEIVING: return QStringLiteral("接收固件");
+    case OTA_STATUS_APPLYING: return QStringLiteral("校验 / 切槽");
+    case OTA_STATUS_OK: return QStringLiteral("成功（即将重启）");
+    case OTA_STATUS_ERROR: return QStringLiteral("失败");
+    default: return QStringLiteral("未知(%1)").arg(status);
     }
 }
 
@@ -846,8 +1409,8 @@ QString NishaMainWindow::otaErrText(unsigned err)
     switch (err) {
     case OTA_ERR_NONE: return QStringLiteral("无");
     case OTA_ERR_PARAM: return QStringLiteral("参数错误");
-    case OTA_ERR_BUSY: return QStringLiteral("设备忙");
-    case OTA_ERR_SIZE: return QStringLiteral("固件尺寸错误");
+    case OTA_ERR_BUSY: return QStringLiteral("忙");
+    case OTA_ERR_SIZE: return QStringLiteral("尺寸错误");
     case OTA_ERR_IO: return QStringLiteral("读写失败");
     case OTA_ERR_APPLY: return QStringLiteral("激活失败");
     case OTA_ERR_STATE: return QStringLiteral("状态错误");
@@ -868,16 +1431,13 @@ void NishaMainWindow::updateOtaUi()
     FirmwareVersion_Format(fw, sizeof(fw));
 
     if (!st.inited) {
-        setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级模块未就绪"));
+        setLabelTextIfChanged(m_lblOtaState, QStringLiteral("OTA 未初始化"));
         setLabelTextIfChanged(m_lblOtaPercent, QStringLiteral("--"));
-        setOtaStep(m_lblOtaStep1, false, false, QStringLiteral("接收"));
-        setOtaStep(m_lblOtaStep2, false, false, QStringLiteral("校验"));
-        setOtaStep(m_lblOtaStep3, false, false, QStringLiteral("重启"));
+        setOtaBadge(m_lblOtaBadge, QStringLiteral("idle"), QStringLiteral("不可用"));
         if (m_otaProgress)
             m_otaProgress->setValue(0);
-        setLabelTextIfChanged(m_lblOtaWarn, QStringLiteral("请稍后重试远程升级"));
         setLabelTextIfChanged(m_lblOtaDetail,
-                              QStringLiteral("当前版本  %1").arg(QString::fromLatin1(fw)));
+                              QStringLiteral("当前固件版本：%1").arg(QString::fromLatin1(fw)));
         setOtaUiLocked(false);
         return;
     }
@@ -899,45 +1459,28 @@ void NishaMainWindow::updateOtaUi()
         setOtaUiLocked(true);
         if (m_stack->currentWidget() != m_pageOta)
             m_stack->setCurrentWidget(m_pageOta);
-
         if (success) {
-            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级完成，即将重启"));
-            setLabelTextIfChanged(m_lblOtaWarn, QStringLiteral("正在激活新固件，请稍候…"));
-            setOtaStep(m_lblOtaStep1, true, false, QStringLiteral("接收"));
-            setOtaStep(m_lblOtaStep2, true, false, QStringLiteral("校验"));
-            setOtaStep(m_lblOtaStep3, false, true, QStringLiteral("重启"));
-        } else if (st.status == OTA_STATUS_APPLYING) {
-            setLabelTextIfChanged(m_lblOtaState, otaStatusText(st.status));
-            setLabelTextIfChanged(m_lblOtaWarn, QStringLiteral("升级过程中请勿断电或退出"));
-            setOtaStep(m_lblOtaStep1, true, false, QStringLiteral("接收"));
-            setOtaStep(m_lblOtaStep2, false, true, QStringLiteral("校验"));
-            setOtaStep(m_lblOtaStep3, false, false, QStringLiteral("重启"));
+            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级成功，即将重启"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("ok"), QStringLiteral("成功"));
         } else {
-            setLabelTextIfChanged(m_lblOtaState, otaStatusText(st.status));
-            setLabelTextIfChanged(m_lblOtaWarn, QStringLiteral("升级过程中请勿断电或退出"));
-            setOtaStep(m_lblOtaStep1, false, true, QStringLiteral("接收"));
-            setOtaStep(m_lblOtaStep2, false, false, QStringLiteral("校验"));
-            setOtaStep(m_lblOtaStep3, false, false, QStringLiteral("重启"));
+            setLabelTextIfChanged(m_lblOtaState,
+                                  QStringLiteral("正在升级 · %1").arg(otaStatusText(st.status)));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("busy"), QStringLiteral("进行中"));
         }
     } else {
         if (m_otaWasBusy) {
             appendUiLog(QStringLiteral("OTA 会话结束"));
             m_otaWasBusy = false;
             setOtaUiLocked(false);
+            if (m_stack->currentWidget() == m_pageOta && m_btnBackOta)
+                m_btnBackOta->setVisible(true);
         }
         if (failed) {
-            if (m_stack->currentWidget() != m_pageOta)
-                m_stack->setCurrentWidget(m_pageOta);
-            if (m_btnBackOta) {
-                m_btnBackOta->setVisible(true);
-                m_btnBackOta->setEnabled(true);
-            }
             setLabelTextIfChanged(m_lblOtaState, QStringLiteral("升级失败"));
-            setLabelTextIfChanged(m_lblOtaWarn,
-                                  QStringLiteral("可返回首页，稍后再由网页重试"));
-            setOtaStep(m_lblOtaStep1, false, false, QStringLiteral("接收"));
-            setOtaStep(m_lblOtaStep2, false, false, QStringLiteral("校验"));
-            setOtaStep(m_lblOtaStep3, false, false, QStringLiteral("重启"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("fail"), QStringLiteral("失败"));
+        } else {
+            setLabelTextIfChanged(m_lblOtaState, QStringLiteral("等待网页下发固件"));
+            setOtaBadge(m_lblOtaBadge, QStringLiteral("idle"), QStringLiteral("空闲"));
         }
     }
 
@@ -963,32 +1506,23 @@ void NishaMainWindow::updateOtaUi()
 
     const QString slot = (st.active_slot == OTA_SLOT_B)
             ? QStringLiteral("B") : QStringLiteral("A");
-    QString detail;
+    QString detail = QStringLiteral("当前固件  %1\n活动槽位  %2\n")
+            .arg(QString::fromLatin1(fw)).arg(slot);
     if (blocking) {
-        detail = QStringLiteral("当前版本  %1    活动槽  %2\n"
-                                "目标版本  %3\n"
-                                "传输进度  %4 / %5 包 · %6 / %7 字节")
-                .arg(QString::fromLatin1(fw))
-                .arg(slot)
+        detail += QStringLiteral("会话版本  %1\n包进度    %2 / %3\n已接收    %4 / %5 字节")
                 .arg(QString::fromLatin1(st.version))
                 .arg(donePkt)
                 .arg(st.pkt_total)
                 .arg(st.recv_size)
                 .arg(st.file_size);
         if (success)
-            detail += QStringLiteral("\n新固件已就绪，设备即将自动重启");
+            detail += QStringLiteral("\n\n新固件已就绪，设备即将重启激活…");
     } else if (failed) {
-        detail = QStringLiteral("当前版本  %1    活动槽  %2\n"
-                                "失败原因  %3\n"
-                                "目标版本  %4")
-                .arg(QString::fromLatin1(fw))
-                .arg(slot)
+        detail += QStringLiteral("失败原因  %1\n目标版本  %2\n\n可点右上角返回首页，稍后由网页重试。")
                 .arg(otaErrText(st.last_err))
                 .arg(QString::fromLatin1(st.last_version));
     } else {
-        detail = QStringLiteral("当前版本  %1    活动槽  %2")
-                .arg(QString::fromLatin1(fw))
-                .arg(slot);
+        detail += QStringLiteral("\n尚未开始传输。收到网页升级指令后将自动全屏锁定。");
     }
     setLabelTextIfChanged(m_lblOtaDetail, detail);
 }
@@ -1001,9 +1535,30 @@ void NishaMainWindow::onExit()
         return;
     }
     BoardBuzzer::forceOff();
-    BoardDisplay::blank();
     qApp->quit();
     ::_exit(0);
+}
+
+void NishaMainWindow::onRebootDevice()
+{
+    if (m_otaUiLocked || OtaUpgrade_IsBusy()) {
+        QMessageBox::warning(this, QStringLiteral("升级中"),
+                             QStringLiteral("正在升级固件，请勿重启或断电。"));
+        return;
+    }
+    const int ret = QMessageBox::question(
+        this,
+        QStringLiteral("重启设备"),
+        QStringLiteral("确定要重启设备吗？"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (ret != QMessageBox::Yes)
+        return;
+
+    appendUiLog(QStringLiteral("用户确认重启设备"));
+    BoardBuzzer::forceOff();
+    sync();
+    (void)system("reboot");
 }
 
 void NishaMainWindow::onNumPadDigit()
@@ -1034,11 +1589,10 @@ void NishaMainWindow::onDefaultStart()
 {
     if (m_otaUiLocked || !m_bizOk)
         return;
-    bool ok = false;
-    const double meters = m_editDefaultDepth->text().toDouble(&ok);
-    if (!ok || meters <= 0.1) {
-        QMessageBox::warning(this, QStringLiteral("默认定深"),
-                             QStringLiteral("请输入有效深度（米），需大于 0.1。"));
+    double meters = 0.0;
+    QString err;
+    if (!parseDepthMeters(m_editDefaultDepth->text(), &meters, &err)) {
+        QMessageBox::warning(this, QStringLiteral("默认定深"), err);
         return;
     }
     const int mm = (int)(meters * 1000.0 + 0.5);
@@ -1054,14 +1608,13 @@ void NishaMainWindow::onVmmStart()
 {
     if (m_otaUiLocked || !m_bizOk)
         return;
-    bool ok1 = false, ok2 = false, ok3 = false, ok4 = false;
-    const double d1 = m_editVmm1->text().toDouble(&ok1);
-    const double d2 = m_editVmm2->text().toDouble(&ok2);
-    const double d3 = m_editVmm3->text().toDouble(&ok3);
-    const double d4 = m_editVmm4->text().toDouble(&ok4);
-    if (!ok1 || !ok2 || !ok3 || !ok4) {
-        QMessageBox::warning(this, QStringLiteral("垂线混合"),
-                             QStringLiteral("请填齐四个深度（米）。"));
+    double d1 = 0.0, d2 = 0.0, d3 = 0.0, d4 = 0.0;
+    QString err;
+    if (!parseDepthMeters(m_editVmm1->text(), &d1, &err)
+            || !parseDepthMeters(m_editVmm2->text(), &d2, &err)
+            || !parseDepthMeters(m_editVmm3->text(), &d3, &err)
+            || !parseDepthMeters(m_editVmm4->text(), &d4, &err)) {
+        QMessageBox::warning(this, QStringLiteral("垂线混合"), err);
         return;
     }
     set_mode_one_para_depth(1, (int)(d1 * 1000.0 + 0.5));
@@ -1077,12 +1630,11 @@ void NishaMainWindow::onVdimStart()
 {
     if (m_otaUiLocked || !m_bizOk)
         return;
-    bool oka = false, okb = false;
-    const double a = m_editVdimA->text().toDouble(&oka);
-    const double b = m_editVdimB->text().toDouble(&okb);
-    if (!oka || !okb) {
-        QMessageBox::warning(this, QStringLiteral("垂线积深"),
-                             QStringLiteral("请填写深度 A / B（米）。"));
+    double a = 0.0, b = 0.0;
+    QString err;
+    if (!parseDepthMeters(m_editVdimA->text(), &a, &err)
+            || !parseDepthMeters(m_editVdimB->text(), &b, &err)) {
+        QMessageBox::warning(this, QStringLiteral("垂线积深"), err);
         return;
     }
     set_mode_two_para_depth(1, (int)(a * 1000.0 + 0.5));
@@ -1102,8 +1654,16 @@ void NishaMainWindow::onStopTask()
 
 void NishaMainWindow::onManualUp()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || !m_pageManual)
         return;
+    const int cur = get_depth_sensor_depth();
+    const int minMm = Config_GetMinWaterDepthMm();
+    if (is_depth_sensor_online() && cur <= minMm) {
+        QMessageBox::information(this, QStringLiteral("手动升降"),
+                                 QStringLiteral("已到最高位置（最浅 %1 m），无法再上升。")
+                                     .arg(minMm / 1000.0, 0, 'f', 2));
+        return;
+    }
     NiShaUD_Stop_Running_Task();
     sleep_ms(10);
     set_dc_motor_speed(600);
@@ -1113,8 +1673,16 @@ void NishaMainWindow::onManualUp()
 
 void NishaMainWindow::onManualDown()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || !m_pageManual)
         return;
+    const int cur = get_depth_sensor_depth();
+    const int maxMm = Config_GetMaxWaterDepthMm();
+    if (is_depth_sensor_online() && cur >= maxMm) {
+        QMessageBox::information(this, QStringLiteral("手动升降"),
+                                 QStringLiteral("已到最低位置（最深 %1 m），无法再下降。")
+                                     .arg(maxMm / 1000.0, 0, 'f', 2));
+        return;
+    }
     NiShaUD_Stop_Running_Task();
     sleep_ms(10);
     set_dc_motor_speed(600);
@@ -1124,7 +1692,7 @@ void NishaMainWindow::onManualDown()
 
 void NishaMainWindow::onManualStop()
 {
-    if (m_otaUiLocked || !m_bizOk)
+    if (m_otaUiLocked || !m_bizOk || !m_pageManual)
         return;
     NiShaUD_Stop_Running_Task();
     sleep_ms(10);

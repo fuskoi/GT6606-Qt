@@ -193,21 +193,18 @@ int SedimentSensorSendCommand(uart_sediment_task_name taskName, int fd, void *va
 int SedimentSensorDataProcessCtrl(int taskName, uint8_t *recvBuffer, uint16_t recvddatalen, CheckModbusResDataPtr checkFunc)
 {
     int ret = 0;
-    ts_printf("SedimentSensor buf: ");
-    print_data(recvddatalen, recvBuffer);
-    ts_printf("\n");
     ret = checkFunc(recvBuffer, recvddatalen, 0xF3);
     if (ret == DATA_PROC_ERROR)
         return DATA_PROC_ERROR;
     if (ret == DATA_PROC_INCOMPLETE)
         return DATA_PROC_INCOMPLETE;
 
+    /* 每次成功读数立刻刷新瞬时值，首页不必等满 50 点平均 */
+    sediment_sensor_info.sediment_value = transform_sediment_sensor_value(recvBuffer + 3);
+
     switch (taskName)
     {
     case SEDIMENT_GET_SEDIMENT_VALUE:
-
-        sediment_sensor_info.sediment_value = transform_sediment_sensor_value(recvBuffer + 3);
-        // printf("sediment value: %f\n", sediment_sensor_info.sediment_value);
         break;
     case NISHA_SEDIMENT_SENSOR_COLLECT_DATA:
         set_sediment_online(true);
@@ -367,13 +364,10 @@ void deal_with_ns_default_mode_collect_data(uint8_t *recvbuffer)
 
     // 这里要入队，均匀报
     enqueue(&g_hour_float, sediment_data_average);
-    ts_printf("count of enqueue = %d\n",g_hour_float.count);
 
     // 这里增加DTU的发送
     g_sediment_data_average = sediment_data_average;
     sl651_send_fixtime_report(&g_stM2UpFramepara);
-
-    ts_printf("sediment data average: %.3f\n", sediment_data_average);
 }
 
 void clear_sediment_sensor(void)

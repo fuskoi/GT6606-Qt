@@ -184,16 +184,6 @@ void NS_sys_reset_motor_error_dc_motor_timeout(void);
 
 int NiShaSystemProcMotorErrorTask(void);
 
-int CarSystemInitTask(void);
-
-bool isCarSystemInitTaskRunning(void);
-
-task_chain_status_t getCarSystemInitTaskStatus(void);
-
-int getCarSystemInitTaskStoppedStep(void);
-
-void *CarSystemInitTaskChainManager(void *arg);
-
 int CarSystemStateCheckTask(void);
 
 bool isCarSystemStateCheckTaskRunning(void);

@@ -72,9 +72,6 @@ int DepthSensorSendCommand(uart_depth_task_name taskName, int fd, void *value)
 int DepthSensorDataProcessCtrl(int taskName, uint8_t *recvBuffer, uint16_t recvddatalen, CheckModbusResDataPtr checkFunc)
 {
     int ret = 0;
-    ts_printf("DepthSensor buf: ");
-    print_data(recvddatalen, recvBuffer);
-    ts_printf("\n");
     ret = checkFunc(recvBuffer, recvddatalen, 0x09);
     if (ret == DATA_PROC_ERROR)
         return DATA_PROC_ERROR;

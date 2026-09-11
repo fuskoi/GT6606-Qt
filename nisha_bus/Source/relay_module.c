@@ -178,9 +178,6 @@ void calulate_volt(uint8_t *recvBuffer)
 int RelayModuleDataProcessCtrl(int taskName, uint8_t *recvBuffer, uint16_t recvddatalen, CheckModbusResDataPtr checkFunc)
 {
     int ret = 0;
-    ts_printf("Relay module: ");
-    print_data(recvddatalen, recvBuffer);
-    ts_printf("\n");
     ret = checkFunc(recvBuffer, recvddatalen, 0xf1);
     if (ret == DATA_PROC_ERROR)
         return DATA_PROC_ERROR;
@@ -323,58 +320,3 @@ void disable_break(void)
     SubmitRelayModuleTask(RELAY_MODULE_OPENTOCLOSE_COM2_COMMON);
 }
 
-// ------------------------ 0.INIT ---------------------------- //
-// void carsystem_init_relaymodulecheck(uint8_t *recvBuffer)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module check [INIT]\n");
-// #endif //
-//     chain_task_complete(CARSYSTEMINIT_TASK_CHAIN);
-//     relay_module.online = true;
-// }
-
-// void carsystem_init_relaymodulecheck_timeout(void)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module check [INIT] [TIMEOUT]\n");
-// #endif //
-//     chain_task_timeout(CARSYSTEMINIT_TASK_CHAIN);
-//     relay_module.online = false;
-// }
-
-// void carsystem_init_disablebreak(uint8_t *recvBuffer)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module disable break[INIT]\n");
-// #endif //
-//     chain_task_complete(CARSYSTEMINIT_TASK_CHAIN);
-//     relay_module.online = true;
-// }
-
-// // 未成功松开刹车 - 结束INIT任务
-// void carsystem_init_disablebreak_timeout(void)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module disable break[INIT] [TIMEOUT]\n");
-// #endif //
-//     chain_task_timeout(CARSYSTEMINIT_TASK_CHAIN);
-//     chain_task_stop(CARSYSTEMINIT_TASK_CHAIN);
-//     relay_module.online = false;
-// }
-
-// void carsystem_init_enablebreak(uint8_t *recvBuffer)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module enable break[INIT]\n");
-// #endif //
-//     chain_task_complete(CARSYSTEMINIT_TASK_CHAIN);
-// }
-
-// void carsystem_init_enablebreak_timeout(void)
-// {
-// #ifdef DEBUG_0
-//     ts_printf("relay module enable break [INIT] [TIMEOUT]\n");
-// #endif //
-//     chain_task_timeout(CARSYSTEMINIT_TASK_CHAIN);
-//     relay_module.online = false;
-// }

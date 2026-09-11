@@ -37,7 +37,12 @@ private slots:
     void onShowVdimPage();
     void onShowManualPage();
     void onShowLogPage();
+    void onShowConfPage();
+    void onShowConfEditPage();
+    void onShowMenuPage();
+    void onShowScreenIdlePage();
     void onExit();
+    void onRebootDevice();
 
     void onDefaultStart();
     void onVmmStart();
@@ -47,6 +52,9 @@ private slots:
     void onManualUp();
     void onManualDown();
     void onManualStop();
+
+    void onScreenIdleChoice();
+    void onConfSave();
 
     void onNumPadDigit();
     void onNumPadBackspace();
@@ -65,9 +73,15 @@ private:
     void setActiveEdit(QLineEdit *edit);
     QLineEdit *makeDepthEdit(QWidget *parent);
     void addNumPad(QVBoxLayout *lay, QWidget *parent);
+    void addNumPad(QVBoxLayout *lay, QWidget *parent, QPushButton *extraBtn1, QPushButton *extraBtn2);
 
     void setOtaUiLocked(bool locked);
     void updateOtaUi();
+    void refreshScreenIdleButtons();
+    void loadConfView();
+    void loadConfEditForm();
+    bool parseDepthMeters(const QString &text, double *outMeters, QString *err) const;
+    bool parse01Field(const QString &text, int *out, const QString &name, QString *err) const;
     static QString otaStatusText(unsigned status);
     static QString otaErrText(unsigned err);
 
@@ -78,7 +92,11 @@ private:
     QWidget *m_pageVmm;
     QWidget *m_pageVdim;
     QWidget *m_pageManual;
+    QWidget *m_pageMenu;
+    QWidget *m_pageScreenIdle;
     QWidget *m_pageLog;
+    QWidget *m_pageConf;
+    QWidget *m_pageConfEdit;
     QWidget *m_pageOta;
 
     QLabel *m_lblClock;
@@ -86,6 +104,8 @@ private:
     QLabel *m_lblMode;
     QLabel *m_lblState;
     DepthProfileView *m_depthProfile;
+    DepthProfileView *m_depthProfileManual;
+    QLabel *m_valDepthManual;
     QLabel *m_valDepth;
     QLabel *m_valSediment;
     QLabel *m_valKeepDepth;
@@ -93,6 +113,7 @@ private:
     QLabel *m_lblDevSediment;
     QLabel *m_lblDevMotor;
     QLabel *m_lblDevRelay;
+    QLabel *m_lblDev4G;
 
     QLineEdit *m_editDefaultDepth;
     QLineEdit *m_editVmm1;
@@ -101,21 +122,27 @@ private:
     QLineEdit *m_editVmm4;
     QLineEdit *m_editVdimA;
     QLineEdit *m_editVdimB;
+    QLineEdit *m_editDog;
+    QLineEdit *m_editSim;
+    QLineEdit *m_editLift;
+    QLineEdit *m_editMaxDepth;
     QLineEdit *m_activeEdit;
+
+    QLabel *m_lblManualLimit;
 
     QPushButton *m_btnBackOta;
     QLabel *m_lblOtaState;
     QLabel *m_lblOtaPercent;
-    QLabel *m_lblOtaWarn;
-    QLabel *m_lblOtaStep1;
-    QLabel *m_lblOtaStep2;
-    QLabel *m_lblOtaStep3;
+    QLabel *m_lblOtaBadge;
     QLabel *m_lblOtaDetail;
     QFrame *m_otaHero;
     QFrame *m_otaDetailCard;
     QProgressBar *m_otaProgress;
 
+    QPushButton *m_btnScreenIdle[5];
+
     QTextEdit *m_log;
+    QTextEdit *m_confView;
     QTimer *m_timer;
     QElapsedTimer m_uptime;
     bool m_bizOk;

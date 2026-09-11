@@ -13,6 +13,7 @@ myhash_t *g_config_list = NULL; // hash结构空指针
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 int ReadConfig(void)
 {
@@ -95,6 +96,194 @@ myhash_t *find_item(char *strkey)
     myhash_t *mh;
     HASH_FIND_STR(g_config_list, strkey, mh);
     return mh;
+}
+
+int Config_GetInt(const char *key, int default_val)
+{
+    myhash_t *item;
+
+    if (key == NULL || key[0] == '\0')
+        return default_val;
+    item = find_item((char *)key);
+    if (item == NULL || item->value[0] == '\0')
+        return default_val;
+    return atoi(item->value);
+}
+
+/* 判断一行是否为 key = ...（忽略前导空白与行内空格） */
+static int conf_line_is_key(const char *line, const char *key)
+{
+    const char *p = line;
+    const char *k = key;
+
+    if (p == NULL || key == NULL)
+        return 0;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p == '#' || *p == '\0' || *p == '\r' || *p == '\n')
+        return 0;
+    while (*k != '\0') {
+        if (*p == ' ' || *p == '\t') {
+            p++;
+            continue;
+        }
+        if (*p != *k)
+            return 0;
+        p++;
+        k++;
+    }
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return (*p == '=');
+}
+
+static int Config_SaveKey(const char *key, const char *value)
+{
+    char appDir[MAX_PATH];
+    char confPath[MAX_PATH];
+    char tmpPath[MAX_PATH];
+    char line[256];
+    FILE *fp_in = NULL;
+    FILE *fp_out = NULL;
+    int found = 0;
+    int ok = -1;
+
+    if (key == NULL || key[0] == '\0' || value == NULL)
+        return -1;
+    if (!GetAppDir(appDir))
+        return -1;
+    snprintf(confPath, sizeof(confPath), "%s/tyls.conf", appDir);
+    snprintf(tmpPath, sizeof(tmpPath), "%s/tyls.conf.tmp", appDir);
+
+    fp_in = fopen(confPath, "rb");
+    if (fp_in == NULL)
+        fp_in = fopen("tyls.conf", "rb");
+    if (fp_in == NULL)
+        return -1;
+
+    fp_out = fopen(tmpPath, "wb");
+    if (fp_out == NULL) {
+        fclose(fp_in);
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp_in) != NULL) {
+        if (!found && conf_line_is_key(line, key)) {
+            fprintf(fp_out, "%s = %s\n", key, value);
+            found = 1;
+        } else {
+            fputs(line, fp_out);
+        }
+    }
+    if (!found)
+        fprintf(fp_out, "\n%s = %s\n", key, value);
+
+    fclose(fp_in);
+    if (fclose(fp_out) != 0) {
+        remove(tmpPath);
+        return -1;
+    }
+
+    if (rename(tmpPath, confPath) != 0) {
+        /* cwd 回退打开时，目标也可能是 ./tyls.conf */
+        if (rename(tmpPath, "tyls.conf") != 0) {
+            remove(tmpPath);
+            return -1;
+        }
+    }
+    ok = 0;
+    return ok;
+}
+
+int Config_SetInt(const char *key, int value)
+{
+    char buf[32];
+
+    if (key == NULL || key[0] == '\0')
+        return -1;
+    snprintf(buf, sizeof(buf), "%d", value);
+    add_item((char *)key, buf);
+    return Config_SaveKey(key, buf);
+}
+
+int Config_GetString(const char *key, char *out, size_t out_size, const char *default_val)
+{
+    myhash_t *item;
+    const char *src;
+
+    if (out == NULL || out_size == 0)
+        return -1;
+    out[0] = '\0';
+    if (key == NULL || key[0] == '\0') {
+        if (default_val != NULL)
+            snprintf(out, out_size, "%s", default_val);
+        return 0;
+    }
+    item = find_item((char *)key);
+    src = (item != NULL && item->value[0] != '\0') ? item->value
+          : (default_val != NULL ? default_val : "");
+    snprintf(out, out_size, "%s", src);
+    return 0;
+}
+
+int Config_SetString(const char *key, const char *value)
+{
+    if (key == NULL || key[0] == '\0' || value == NULL)
+        return -1;
+    add_item((char *)key, (char *)value);
+    return Config_SaveKey(key, value);
+}
+
+double Config_GetDouble(const char *key, double default_val)
+{
+    char buf[40];
+    char *end = NULL;
+    double v;
+
+    if (Config_GetString(key, buf, sizeof(buf), "") != 0 || buf[0] == '\0')
+        return default_val;
+    v = strtod(buf, &end);
+    if (end == buf)
+        return default_val;
+    return v;
+}
+
+int Config_SetDouble(const char *key, double value)
+{
+    char buf[40];
+
+    if (key == NULL || key[0] == '\0')
+        return -1;
+    snprintf(buf, sizeof(buf), "%.3f", value);
+    return Config_SetString(key, buf);
+}
+
+int Config_GetMaxWaterDepthMm(void)
+{
+    double m = Config_GetDouble("MaxWaterDepth", 8.0);
+    if (m < 0.5)
+        m = 0.5;
+    if (m > 50.0)
+        m = 50.0;
+    return (int)(m * 1000.0 + 0.5);
+}
+
+int Config_GetMinWaterDepthMm(void)
+{
+    double m = Config_GetDouble("MinWaterDepth", 0.1);
+    int maxMm = Config_GetMaxWaterDepthMm();
+    int mm;
+
+    if (m < 0.05)
+        m = 0.05;
+    mm = (int)(m * 1000.0 + 0.5);
+    if (mm < 50)
+        mm = 50;
+    if (mm >= maxMm)
+        mm = maxMm / 10;
+    if (mm < 50)
+        mm = 50;
+    return mm;
 }
 
 void add_item(char *strkey, char *strvalue)

@@ -132,13 +132,6 @@ void TimerTask(void)
             }
         }
     }
-    if (global_tick % (3000 / BASE_INTERVAL) == 0)
-    {
-        // SubmitDepthSensorTask(DEPTH_GET_DEPTH_WTEMP_WPRE);
-        // SubmitSedimentSensorTask(SEDIMENT_GET_SEDIMENT_VALUE);
-
-        
-    }
     if (global_tick % (6000 / BASE_INTERVAL) == 0)
     {
         if (GetNiShaUD_Task_State() == SedimentUD_IDLE && (get_nisha_task_mode() == SedimentUD_Mode_Default || get_nisha_task_mode() == SedimentUD_Mode_Manual))
@@ -146,7 +139,6 @@ void TimerTask(void)
             if (!OtaUpgrade_IsBusy()) {
                 SubmitRelayModuleHeartTask();
                 SubmitSedimentSensorTask(NISHA_DEFAULT_MODE_COLLECT_DATA);
-                ts_printf("6 sec\n");
             }
         }
 
@@ -154,44 +146,13 @@ void TimerTask(void)
         {
             if (!OtaUpgrade_IsBusy() && get_device_index(DEPTH_SENSOR) != -1) {
                 SubmitDepthSensorTask(DEPTH_GET_DEPTH_WTEMP_WPRE);
-                int cur_depth = get_depth_sensor_depth();
-                ts_printf("Current Depth: %d mm\n", cur_depth);
-                default_mode_send_depth_to_screen(cur_depth * 0.001f);
-                manual_mode_send_depth_to_screen(cur_depth * 0.001f);
             }
-        }
-
-        if (get_device_index(LORA) != -1) {
-            send_sensor_state_to_screen();
         }
     }
 
     if (global_tick % (7000 / BASE_INTERVAL) == 0)
     {
         WatchDogControl();
-    }
-    if (global_tick % (30000 / BASE_INTERVAL) == 0)
-    {
-        // if (SubmitDcMotorTask(dc_motor_running_online_check) == 0)
-        // {
-        //     ts_printf("DC_MOTOR_online_OK\n");
-        // } // 每隔6秒检测电机是否在线
-
-        // // sleep_ms(80);
-
-        // if (SubmitRelayModuleTask(relay_module_runnig_online_check) == 0)
-        // {
-        //     ts_printf("RELAY_MODULE_online_OK\n");
-        // } // 每隔6秒检测继电器是否在线
-        if (is_current_hour_and_minute(8, 2))
-        {
-        }
-    }
-
-    if (global_tick % (72000 / BASE_INTERVAL) == 0)
-    {
-        // sl651_send_hour_report(&g_stM2UpFramepara); // 72秒发一次均匀报，测试用，后面要注释掉
-        // ts_printf("send hour frame finished\n");
     }
 
     if (global_tick % (600000 / BASE_INTERVAL) == 0)
@@ -200,9 +161,6 @@ void TimerTask(void)
         {
             SubmitSedimentSensorTask(SEDIMENT_CLEAR_SEDIMENT_SENSOR);
         }
-    }
-    if (global_tick % (3600000 / BASE_INTERVAL) == 0)
-    {
     }
     if (global_tick >= 7200000) // 大于两个小时，计数器清0
         global_tick = 0;
@@ -371,29 +329,6 @@ bool is_current_minute(int minute)
     localtime_r(&current_ts.tv_sec, &time_info); // 安全地转换时间
 
     return time_info.tm_min == minute;
-}
-
-/**
- * 判断当前时间是否为指定的小时和分钟
- * @param hour 指定的小时数 (0-23)
- * @param minute 指定的分钟数 (0-59)
- * @return 匹配返回 true, 否则返回 false
- */
-bool is_current_hour_and_minute(int hour, int minute)
-{
-    // 验证输入的有效性
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59)
-    {
-        return false;
-    }
-
-    struct timespec current_ts;
-    get_current_time(&current_ts);
-
-    struct tm time_info;
-    localtime_r(&current_ts.tv_sec, &time_info); // 安全地转换时间
-
-    return (time_info.tm_hour == hour) && (time_info.tm_min == minute);
 }
 
 /**
