@@ -1,0 +1,5 @@
+*.o
+moc_*.cpp
+Makefile
+tel15_gt6606
+tel15_gt6606.ota
