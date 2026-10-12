@@ -1,5 +1,4 @@
 #include "dc_motor.h"
-#include "device_sim.h"
 dc_motor_info_t dc_motor_info = {
     .error_code = DC_MOTOR_ERROR_CODE_NONE,
     .is_running = false,
@@ -207,9 +206,6 @@ void dc_motor_emergency_stop(int fd)
 int SubmitDcMotorTask(uart_dcmotor_task_name taskName)
 {
     int index;
-
-    if (DeviceSim_SubmitMotor((int)taskName))
-        return 0;
 
     index = get_device_index(DC_MOTOR);
     if (index < 0 || index >= MAX_UART_NUM)

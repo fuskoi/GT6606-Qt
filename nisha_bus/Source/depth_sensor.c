@@ -1,5 +1,4 @@
 #include "depth_sensor.h"
-#include "device_sim.h"
 depth_sensor_info_t depth_sensor_info = {
     .online = false,
     .depth = 0,
@@ -149,9 +148,6 @@ int depth_data_process(uint8_t *recvBuffer)
 int SubmitDepthSensorTask(uart_depth_task_name taskName)
 {
     int index;
-
-    if (DeviceSim_SubmitDepth((int)taskName))
-        return 0;
 
     index = get_device_index(DEPTH_SENSOR);
     if (index < 0 || index >= MAX_UART_NUM)

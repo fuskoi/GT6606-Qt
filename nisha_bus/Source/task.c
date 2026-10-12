@@ -1,5 +1,4 @@
 #include "task.h"
-#include "device_sim.h"
 task_chain_t nisha_sys_check_task = {
     .chainStatus = TASKCHAIN_WAITING,
     .chainStop_step = -1,
@@ -270,29 +269,52 @@ void *CommonTaskChainManager(void *arg)
             UNLOCK(chain);
 
             // 设置任务状态并加入队列
-            chain->taskItem[chain->step].sendTime = time(NULL);
-            chain->taskStatus = TASK_WAITING;
-            if (chain->taskItem[chain->step].taskPort < 0 || chain->taskItem[chain->step].taskPort > 5)
+            if (!chain->taskItem)
             {
-                // 处理无效的任务端口
-                ts_printf("taskPort:%d\n", chain->taskItem[chain->step].taskPort);
-                LOG(LOG_ERROR, "Task Chain [%s] step [%d] Invalid task port", GetTaskChainName(chain->code), chain->step);
+                LOG(LOG_ERROR, "Task Chain [%s] step [%d] taskItem is NULL",
+                    GetTaskChainName(chain->code), chain->step);
                 chain->stopRequested = true;
                 chain->taskStatus = TASK_ENQUEUE_FAILED;
                 break;
+            }
+            chain->taskItem[chain->step].sendTime = time(NULL);
+            chain->taskStatus = TASK_WAITING;
+            {
+                int port = chain->taskItem[chain->step].taskPort;
+                if (port < 0 || port > 5)
+                {
+                    ts_printf("taskPort:%d\n", port);
+                    LOG(LOG_ERROR, "Task Chain [%s] step [%d] Invalid task port",
+                        GetTaskChainName(chain->code), chain->step);
+                    chain->stopRequested = true;
+                    chain->taskStatus = TASK_ENQUEUE_FAILED;
+                    break;
+                }
+                /* COM1 未配 ROLE / SERVER 口无任务队列，入队会空指针崩溃 */
+                if (g_uartWorkInfoArry[port].role != UART_ACTIVE_CONTROL
+                    || g_uartWorkInfoArry[port].taskQueue.mutex == NULL
+                    || g_uartWorkInfoArry[port].taskQueue.pItemArray == NULL)
+                {
+                    LOG(LOG_ERROR,
+                        "Task Chain [%s] step [%d] COM%d not ACTIVE/queue not ready",
+                        GetTaskChainName(chain->code), chain->step, port + 1);
+                    chain->taskStatus = TASK_TIMEOUT;
+                    chain->chainStop_step = chain->step;
+                    chain->step++;
+                    continue;
+                }
             }
 
             if (!EnTaskQueue_List(
                     &g_uartWorkInfoArry[chain->taskItem[chain->step].taskPort].taskQueue,
                     &chain->taskItem[chain->step]))
             {
-                // 入队失败处理
-                LOG(LOG_ERROR, "Task Chain [%s] step [%d] EnTaskQueue_List Failed", GetTaskChainName(chain->code), chain->step);
-                chain->stopRequested = true;
-                chain->taskStatus = TASK_ENQUEUE_FAILED;
-                // chain->chainStatus = TASKCHAIN_STOPPED;
-                // atomic_store(&chain->stopRequested, true);
-                // break;
+                LOG(LOG_ERROR, "Task Chain [%s] step [%d] EnTaskQueue_List Failed",
+                    GetTaskChainName(chain->code), chain->step);
+                chain->taskStatus = TASK_TIMEOUT;
+                chain->chainStop_step = chain->step;
+                chain->step++;
+                continue;
             }
             // PrintTaskQueue_List(
             //     &g_uartWorkInfoArry[chain->taskItem[chain->step].taskPort].taskQueue);
@@ -421,46 +443,40 @@ bool StartTaskThread(void)
 
 bool isTaskChainRunning(task_chain_t *taskChain)
 {
-    if (taskChain->chainStatus == TASKCHAIN_RUNNING || taskChain->chainStatus == TASKCHAIN_SUBMIT)
-    {
-        return true;
-    }
-    else
-    {
+    if (!taskChain)
         return false;
-    }
+    if (taskChain->chainStatus == TASKCHAIN_RUNNING || taskChain->chainStatus == TASKCHAIN_SUBMIT)
+        return true;
+    return false;
 }
 
 void changeTaskStatus(task_chain_t *taskChain, int status)
 {
+    if (!taskChain)
+        return;
     LOCK(taskChain);
     taskChain->taskStatus = status;
     UNLOCK(taskChain);
-    // ts_printf("taskChain->chainStatus = %d\n", taskChain->chainStatus);
 }
 // 单个任务完成时 更改任务状态为TASK_READY
 void chain_task_complete(task_chain_name_t chain_code)
 {
     task_chain_t *taskChain = GetTaskChain(chain_code);
-    if (isTaskChainRunning(taskChain))
-    {
+    if (taskChain && isTaskChainRunning(taskChain))
         changeTaskStatus(taskChain, TASK_READY);
-    }
 }
 // 单个任务完成时 自定义任务状态(taskStatus = TASK_FINISHED 可以不用等待到下一步的间隔时间，快速执行下一步),
 void chain_task_complete_choosestatus(task_chain_name_t chain_code, task_status_t taskStatus)
 {
     task_chain_t *taskChain = GetTaskChain(chain_code);
-    if (isTaskChainRunning(taskChain))
-    {
+    if (taskChain && isTaskChainRunning(taskChain))
         changeTaskStatus(taskChain, taskStatus);
-    }
 }
 // 单个任务完成时 更改任务状态 并切换到上一步
 void chain_task_switch_previous_step(task_chain_name_t chain_code)
 {
     task_chain_t *taskChain = GetTaskChain(chain_code);
-    if (isTaskChainRunning(taskChain))
+    if (taskChain && isTaskChainRunning(taskChain))
     {
         changeTaskStatus(taskChain, TASK_READY);
         loadTaskChainPreviousStep(taskChain);
@@ -469,19 +485,15 @@ void chain_task_switch_previous_step(task_chain_name_t chain_code)
 void chain_task_timeout(task_chain_name_t chain_code)
 {
     task_chain_t *taskChain = GetTaskChain(chain_code);
-    if (isTaskChainRunning(taskChain))
-    {
+    if (taskChain && isTaskChainRunning(taskChain))
         changeTaskStatus(taskChain, TASK_TIMEOUT);
-    }
 }
 
 void chain_task_stop(task_chain_name_t chain_code)
 {
     task_chain_t *taskChain = GetTaskChain(chain_code);
-    if (isTaskChainRunning(taskChain))
-    {
+    if (taskChain && isTaskChainRunning(taskChain))
         stopTaskChain(taskChain);
-    }
 }
 
 void stopTaskChain(task_chain_t *taskChain)
@@ -584,6 +596,19 @@ void load_task_item(task_item_t *dest_task, task_item_t *src_task)
 // -------------------------------  任务0 系统初始化 ------------------------------------- //
 #define NISHA_SYS_CHECK_TASK_COUNT 5
 
+/* 仅 ACTIVE 且已建队列的口可入自检链（COM1 无 ROLE 时勿绑外设） */
+static int check_port_ready(int port)
+{
+    if (port < 0 || port > 5)
+        return 0;
+    if (g_uartWorkInfoArry[port].role != UART_ACTIVE_CONTROL)
+        return 0;
+    if (g_uartWorkInfoArry[port].taskQueue.mutex == NULL
+        || g_uartWorkInfoArry[port].taskQueue.pItemArray == NULL)
+        return 0;
+    return 1;
+}
+
 int NiShaSystemCheckTask(void)
 {
     if (isTaskChainRunning(&nisha_sys_check_task))
@@ -605,10 +630,8 @@ int NiShaSystemCheckTask(void)
 
     nisha_sys_check_task.chainStatus = TASKCHAIN_SUBMIT;
 
-    /* 只加入已在配置中绑定串口的设备，避免 taskPort=-1 打断自检链；
-     * SimMissingDevices 开启时跳过模拟设备，只实检泥沙等真实外设 */
     port = get_device_index(RELAY_MODULE);
-    if (port != -1 && !DeviceSim_Relay())
+    if (check_port_ready(port))
     {
         memset(&temp_task, 0, sizeof(temp_task));
         temp_task.deviceName = RELAY_MODULE;
@@ -618,9 +641,13 @@ int NiShaSystemCheckTask(void)
         temp_task.taskPort = port;
         load_task_item(&tasks[step_count++], &temp_task);
     }
+    else if (port != -1)
+    {
+        LOG(LOG_WARNING, "NiShaSystemCheckTask: skip RELAY_MODULE, COM%d not ACTIVE", port + 1);
+    }
 
     port = get_device_index(DEPTH_SENSOR);
-    if (port != -1 && !DeviceSim_Depth())
+    if (check_port_ready(port))
     {
         memset(&temp_task, 0, sizeof(temp_task));
         temp_task.deviceName = DEPTH_SENSOR;
@@ -630,9 +657,13 @@ int NiShaSystemCheckTask(void)
         temp_task.taskPort = port;
         load_task_item(&tasks[step_count++], &temp_task);
     }
+    else if (port != -1)
+    {
+        LOG(LOG_WARNING, "NiShaSystemCheckTask: skip DEPTH_SENSOR, COM%d not ACTIVE", port + 1);
+    }
 
     port = get_device_index(SEDIMENT_SENSOR);
-    if (port != -1)
+    if (check_port_ready(port))
     {
         memset(&temp_task, 0, sizeof(temp_task));
         temp_task.deviceName = SEDIMENT_SENSOR;
@@ -642,9 +673,13 @@ int NiShaSystemCheckTask(void)
         temp_task.taskPort = port;
         load_task_item(&tasks[step_count++], &temp_task);
     }
+    else if (port != -1)
+    {
+        LOG(LOG_WARNING, "NiShaSystemCheckTask: skip SEDIMENT_SENSOR, COM%d not ACTIVE", port + 1);
+    }
 
     port = get_device_index(DC_MOTOR);
-    if (port != -1 && !DeviceSim_Motor())
+    if (check_port_ready(port))
     {
         memset(&temp_task, 0, sizeof(temp_task));
         temp_task.deviceName = DC_MOTOR;
@@ -654,9 +689,13 @@ int NiShaSystemCheckTask(void)
         temp_task.taskPort = port;
         load_task_item(&tasks[step_count++], &temp_task);
     }
+    else if (port != -1)
+    {
+        LOG(LOG_WARNING, "NiShaSystemCheckTask: skip DC_MOTOR, COM%d not ACTIVE", port + 1);
+    }
 
     port = get_device_index(ENCODER);
-    if (port != -1)
+    if (check_port_ready(port))
     {
         memset(&temp_task, 0, sizeof(temp_task));
         temp_task.deviceName = ENCODER;
@@ -665,6 +704,10 @@ int NiShaSystemCheckTask(void)
         temp_task.value = NULL;
         temp_task.taskPort = port;
         load_task_item(&tasks[step_count++], &temp_task);
+    }
+    else if (port != -1)
+    {
+        LOG(LOG_WARNING, "NiShaSystemCheckTask: skip ENCODER, COM%d not ACTIVE", port + 1);
     }
 
     if (step_count == 0)

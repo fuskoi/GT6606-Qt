@@ -1,5 +1,4 @@
 #include "relay_module.h"
-#include "device_sim.h"
 relay_module_info_t relay_module = {
     .online = false,
     .breakWorking = true,
@@ -89,9 +88,6 @@ int SubmitRelayModuleTask(uart_relay_module_task_name taskName)
 {
     int index;
 
-    if (DeviceSim_SubmitRelay((int)taskName))
-        return 0;
-
     index = get_device_index(RELAY_MODULE);
     if (index < 0 || index >= MAX_UART_NUM)
         return -3;
@@ -108,9 +104,6 @@ int SubmitRelayModuleTask(uart_relay_module_task_name taskName)
 int SubmitRelayModuleHeartTask(void)
 {
     int index;
-
-    if (DeviceSim_SubmitRelay((int)RELAY_MODULE_HEARTBEAT))
-        return 0;
 
     index = get_device_index(RELAY_MODULE);
     if (index < 0 || index >= MAX_UART_NUM)

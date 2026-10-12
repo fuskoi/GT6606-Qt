@@ -68,6 +68,10 @@ int findInsertPosition(plist_queue_t taskQueue, ptask_item_t new_task)
 
 bool EnTaskQueue_List(plist_queue_t taskQueue, void *pItemSrc)
 {
+    if (!taskQueue || !pItemSrc || !taskQueue->mutex || !taskQueue->pItemArray
+        || taskQueue->maxArrayLen <= 0 || taskQueue->itemSize <= 0)
+        return false;
+
     if (pthread_mutex_lock(taskQueue->mutex) != 0)
         return false;
 

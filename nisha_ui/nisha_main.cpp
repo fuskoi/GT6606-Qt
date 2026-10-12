@@ -7,6 +7,7 @@
 #include "nisha_mainwindow.h"
 
 #include <signal.h>
+#include <pthread.h>
 #include <unistd.h>
 
 extern "C" {
@@ -30,6 +31,14 @@ int main(int argc, char *argv[])
 {
     signal(SIGINT, onPosixSignal);
     signal(SIGTERM, onPosixSignal);
+
+    /* 业务定时器使用 SIGALRM；主线程屏蔽，避免打断 Qt 事件循环导致触控“无响应后一起爆发” */
+    {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGALRM);
+        pthread_sigmask(SIG_BLOCK, &set, NULL);
+    }
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Nisha GT6606"));

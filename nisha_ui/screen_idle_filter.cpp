@@ -72,7 +72,7 @@ bool ScreenIdleFilter::eventFilter(QObject *watched, QEvent *event)
 
     if (m_blanked) {
         noteActivity();
-        return true;
+        return true; /* 仅唤醒；遮罩顶层，本次点击不往下传 */
     }
     noteActivity();
     return false;

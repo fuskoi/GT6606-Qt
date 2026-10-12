@@ -82,6 +82,7 @@ private:
     void loadConfEditForm();
     bool parseDepthMeters(const QString &text, double *outMeters, QString *err) const;
     bool parse01Field(const QString &text, int *out, const QString &name, QString *err) const;
+    bool parsePortField(const QString &text, int *out, const QString &name, QString *err) const;
     static QString otaStatusText(unsigned status);
     static QString otaErrText(unsigned err);
 
@@ -123,9 +124,13 @@ private:
     QLineEdit *m_editVdimA;
     QLineEdit *m_editVdimB;
     QLineEdit *m_editDog;
-    QLineEdit *m_editSim;
     QLineEdit *m_editLift;
     QLineEdit *m_editMaxDepth;
+    QLineEdit *m_editPortSediment;
+    QLineEdit *m_editPortDepth;
+    QLineEdit *m_editPortMotor;
+    QLineEdit *m_editPortRelay;
+    QLineEdit *m_editPortDtu;
     QLineEdit *m_activeEdit;
 
     QLabel *m_lblManualLimit;

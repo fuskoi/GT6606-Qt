@@ -44,7 +44,6 @@ SOURCES += \
     $$NISHA_ROOT/Source/data_proc.c \
     $$NISHA_ROOT/Source/dc_motor.c \
     $$NISHA_ROOT/Source/depth_sensor.c \
-    $$NISHA_ROOT/Source/device_sim.c \
     $$NISHA_ROOT/Source/encoder.c \
     $$NISHA_ROOT/Source/FirmwareVersion.c \
     $$NISHA_ROOT/Source/hour_frame.c \

@@ -469,11 +469,14 @@ int InitUartDeviceFromConfig(void)
             g_uartWorkInfoArry[i].role = UART_ACTIVE_CONTROL;
             g_uartWorkInfoArry[i].bRunTask = false;
             pthread_mutex_init(&g_lock[i], NULL);
-            // 创建任务数组
-            ptask_item_t pTaskArray = (ptask_item_t)malloc(sizeof(task_item_t) * TASKCOUNT + 1);
-            // 初始化锁资源
+            /* 须分配 (TASKCOUNT+1) 个元素；原先 +1 只多 1 字节 */
+            ptask_item_t pTaskArray = (ptask_item_t)malloc(sizeof(task_item_t) * (TASKCOUNT + 1));
+            if (!pTaskArray)
+            {
+                LOG(LOG_ERROR, "UART%d task queue malloc failed", i + 1);
+                continue;
+            }
             g_uartWorkInfoArry[i].taskQueue.mutex = &g_lock[i];
-            // 初始化任务队列
             InitTaskQueue_List(sizeof(task_item_t), TASKCOUNT + 1, pTaskArray, &g_uartWorkInfoArry[i].taskQueue);
 
             // 初始化DTU的均匀报队列，只针对串口3的泥沙传感器，读取的数据存入此队列

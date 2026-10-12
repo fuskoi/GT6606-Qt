@@ -24,9 +24,11 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector>
+#include <QMetaObject>
 #include <cstring>
 #include <cstdlib>
 #include <unistd.h>
+#include <pthread.h>
 
 extern "C" {
 #include "NishaApp.h"
@@ -49,6 +51,16 @@ void setLabelTextIfChanged(QLabel *lab, const QString &text)
     if (!lab || lab->text() == text)
         return;
     lab->setText(text);
+}
+
+/* 业务启动放后台，避免阻塞 Qt 主线程触控 */
+void *nishaBusinessStartThread(void *arg)
+{
+    NishaMainWindow *w = static_cast<NishaMainWindow *>(arg);
+    const int rc = Nisha_BusinessStart();
+    QMetaObject::invokeMethod(w, "onBusinessReady", Qt::QueuedConnection,
+                              Q_ARG(int, rc));
+    return NULL;
 }
 
 void setDevChip(QLabel *lab, const QString &name, bool ok)
@@ -160,9 +172,13 @@ NishaMainWindow::NishaMainWindow(QWidget *parent)
     , m_editVdimA(0)
     , m_editVdimB(0)
     , m_editDog(0)
-    , m_editSim(0)
     , m_editLift(0)
     , m_editMaxDepth(0)
+    , m_editPortSediment(0)
+    , m_editPortDepth(0)
+    , m_editPortMotor(0)
+    , m_editPortRelay(0)
+    , m_editPortDtu(0)
     , m_activeEdit(0)
     , m_lblManualLimit(0)
     , m_btnBackOta(0)
@@ -813,31 +829,37 @@ void NishaMainWindow::buildUi()
         connect(back, SIGNAL(clicked()), this, SLOT(onShowMenuPage()));
     }
 
-    /* 修改配置：2×2 对齐排版；键盘下「清空|保存|返回」同行 */
+    /* 修改配置：左表单 + 右数字键盘；底栏「清空 | 保存 | 返回」 */
     m_pageConfEdit = new QWidget(m_stack);
     {
         QVBoxLayout *vl = new QVBoxLayout(m_pageConfEdit);
-        vl->setContentsMargins(16, 12, 16, 10);
-        vl->setSpacing(12);
+        vl->setContentsMargins(12, 8, 12, 10);
+        vl->setSpacing(8);
 
         QLabel *h = new QLabel(QStringLiteral("修改配置"), m_pageConfEdit);
         h->setObjectName(QStringLiteral("title"));
         vl->addWidget(h);
-        QLabel *hint = new QLabel(QStringLiteral("点选输入框后用下方键盘填写，保存写入 tyls.conf。"), m_pageConfEdit);
-        hint->setStyleSheet(QStringLiteral("color:#5a6a7a; font-size:15px;"));
+        QLabel *hint = new QLabel(
+            QStringLiteral("点选输入框后用右侧键盘填写；串口改后需重启生效。"),
+            m_pageConfEdit);
+        hint->setStyleSheet(QStringLiteral("color:#5a6a7a; font-size:14px;"));
+        hint->setWordWrap(true);
         vl->addWidget(hint);
+
+        QHBoxLayout *body = new QHBoxLayout();
+        body->setSpacing(12);
 
         QFrame *formCard = new QFrame(m_pageConfEdit);
         formCard->setObjectName(QStringLiteral("metricBox"));
         QGridLayout *grid = new QGridLayout(formCard);
-        grid->setContentsMargins(20, 18, 20, 18);
-        grid->setHorizontalSpacing(28);
-        grid->setVerticalSpacing(16);
+        grid->setContentsMargins(12, 10, 12, 10);
+        grid->setHorizontalSpacing(10);
+        grid->setVerticalSpacing(8);
         grid->setColumnStretch(1, 1);
         grid->setColumnStretch(3, 1);
 
-        const int labW = 120;
-        const int editH = 52;
+        const int labW = 88;
+        const int editH = 40;
         auto placeField = [&](int r, int cLab, const QString &name,
                               QLineEdit **editOut, const QString &placeholder) {
             QLabel *lab = new QLabel(name, formCard);
@@ -845,33 +867,70 @@ void NishaMainWindow::buildUi()
             lab->setMinimumHeight(editH);
             lab->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
             lab->setStyleSheet(QStringLiteral(
-                "font-size:22px; font-weight:bold; color:#0f2a44; background:transparent;"));
+                "font-size:17px; font-weight:bold; color:#0f2a44; background:transparent;"));
             QLineEdit *e = makeDepthEdit(formCard);
             e->setPlaceholderText(placeholder);
             e->setMinimumHeight(editH);
             e->setMaximumHeight(editH);
-            e->setMinimumWidth(160);
+            e->setMinimumWidth(72);
             e->setStyleSheet(QStringLiteral(
-                "QLineEdit { font-size:24px; font-weight:600; background:#f4f7fb;"
-                " border:1px solid #c5d0dc; border-radius:8px; padding:4px 10px; }"));
+                "QLineEdit { font-size:20px; font-weight:600; background:#f4f7fb;"
+                " border:1px solid #c5d0dc; border-radius:8px; padding:2px 6px; }"));
             grid->addWidget(lab, r, cLab, Qt::AlignVCenter | Qt::AlignRight);
             grid->addWidget(e, r, cLab + 1);
             *editOut = e;
         };
 
         placeField(0, 0, QStringLiteral("看门狗"), &m_editDog, QStringLiteral("0/1"));
-        placeField(0, 2, QStringLiteral("模拟外设"), &m_editSim, QStringLiteral("0/1"));
-        placeField(1, 0, QStringLiteral("手动升降"), &m_editLift, QStringLiteral("0/1"));
-        placeField(1, 2, QStringLiteral("最大水深"), &m_editMaxDepth, QStringLiteral("米"));
-        vl->addWidget(formCard, 0);
+        placeField(0, 2, QStringLiteral("手动升降"), &m_editLift, QStringLiteral("0/1"));
+        placeField(1, 0, QStringLiteral("最大水深"), &m_editMaxDepth, QStringLiteral("米"));
+        placeField(2, 0, QStringLiteral("泥沙口"), &m_editPortSediment, QStringLiteral("1-6"));
+        placeField(2, 2, QStringLiteral("深度口"), &m_editPortDepth, QStringLiteral("1-6"));
+        placeField(3, 0, QStringLiteral("电机口"), &m_editPortMotor, QStringLiteral("1-6"));
+        placeField(3, 2, QStringLiteral("继电器口"), &m_editPortRelay, QStringLiteral("1-6"));
+        placeField(4, 0, QStringLiteral("4G口"), &m_editPortDtu, QStringLiteral("1-6"));
+        body->addWidget(formCard, 3);
 
+        QFrame *padCard = new QFrame(m_pageConfEdit);
+        padCard->setObjectName(QStringLiteral("metricBox"));
+        QVBoxLayout *padLay = new QVBoxLayout(padCard);
+        padLay->setContentsMargins(10, 10, 10, 10);
+        padLay->setSpacing(6);
+        QGridLayout *pad = new QGridLayout();
+        pad->setHorizontalSpacing(8);
+        pad->setVerticalSpacing(8);
+        const char *keys[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "<-"};
+        for (int i = 0; i < 12; ++i) {
+            QPushButton *kb = makeBtn(QString::fromLatin1(keys[i]), padCard);
+            kb->setMinimumHeight(48);
+            kb->setMinimumWidth(56);
+            kb->setObjectName(QStringLiteral("secondary"));
+            pad->addWidget(kb, i / 3, i % 3);
+            if (i == 11)
+                connect(kb, SIGNAL(clicked()), this, SLOT(onNumPadBackspace()));
+            else
+                connect(kb, SIGNAL(clicked()), this, SLOT(onNumPadDigit()));
+        }
+        padLay->addLayout(pad, 1);
+        body->addWidget(padCard, 2);
+        vl->addLayout(body, 1);
+
+        QHBoxLayout *footer = new QHBoxLayout();
+        footer->setSpacing(12);
+        QPushButton *clr = makeBtn(QStringLiteral("清空"), m_pageConfEdit);
+        clr->setObjectName(QStringLiteral("secondary"));
+        clr->setMinimumHeight(52);
         QPushButton *save = makeBtn(QStringLiteral("保存"), m_pageConfEdit);
+        save->setMinimumHeight(52);
         QPushButton *back = makeBtn(QStringLiteral("返回"), m_pageConfEdit);
         back->setObjectName(QStringLiteral("secondary"));
+        back->setMinimumHeight(52);
+        footer->addWidget(clr, 1);
+        footer->addWidget(save, 2);
+        footer->addWidget(back, 1);
+        vl->addLayout(footer);
 
-        vl->addStretch(1);
-        addNumPad(vl, m_pageConfEdit, save, back);
-
+        connect(clr, SIGNAL(clicked()), this, SLOT(onNumPadClear()));
         connect(save, SIGNAL(clicked()), this, SLOT(onConfSave()));
         connect(back, SIGNAL(clicked()), this, SLOT(onShowConfPage()));
     }
@@ -996,12 +1055,20 @@ bool NishaMainWindow::eventFilter(QObject *watched, QEvent *event)
             setActiveEdit(m_editVdimB);
         else if (watched == m_editDog)
             setActiveEdit(m_editDog);
-        else if (watched == m_editSim)
-            setActiveEdit(m_editSim);
         else if (watched == m_editLift)
             setActiveEdit(m_editLift);
         else if (watched == m_editMaxDepth)
             setActiveEdit(m_editMaxDepth);
+        else if (watched == m_editPortSediment)
+            setActiveEdit(m_editPortSediment);
+        else if (watched == m_editPortDepth)
+            setActiveEdit(m_editPortDepth);
+        else if (watched == m_editPortMotor)
+            setActiveEdit(m_editPortMotor);
+        else if (watched == m_editPortRelay)
+            setActiveEdit(m_editPortRelay);
+        else if (watched == m_editPortDtu)
+            setActiveEdit(m_editPortDtu);
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -1022,8 +1089,13 @@ void NishaMainWindow::setBizEnabled(bool on)
 void NishaMainWindow::onStartBusiness()
 {
     appendUiLog(QStringLiteral("正在初始化串口 / 定时器 / 任务线程…"));
-    const int rc = Nisha_BusinessStart();
-    onBusinessReady(rc);
+    pthread_t th;
+    if (pthread_create(&th, NULL, nishaBusinessStartThread, this) != 0) {
+        appendUiLog(QStringLiteral("无法创建业务启动线程，改为同步启动"));
+        onBusinessReady(Nisha_BusinessStart());
+        return;
+    }
+    pthread_detach(th);
 }
 
 void NishaMainWindow::onBusinessReady(int result)
@@ -1059,8 +1131,7 @@ void NishaMainWindow::onRefresh()
         if (otaBusy || m_otaWasBusy || m_otaUiLocked
                 || (m_pageOta && m_stack->currentWidget() == m_pageOta)) {
             updateOtaUi();
-            if (otaBusy)
-                (void)OtaUpgrade_KickIfStalled(0U);
+            /* Kick 留在业务定时器线程，避免 UI 刷新路径同步发网络 */
         }
         if (m_otaUiLocked)
             return;
@@ -1278,12 +1349,20 @@ void NishaMainWindow::loadConfEditForm()
 {
     if (m_editDog)
         m_editDog->setText(QString::number(Config_GetInt("DOG", 0) ? 1 : 0));
-    if (m_editSim)
-        m_editSim->setText(QString::number(Config_GetInt("SimMissingDevices", 0) ? 1 : 0));
     if (m_editLift)
         m_editLift->setText(QString::number(Config_GetInt("EnableManualLift", 1) ? 1 : 0));
     if (m_editMaxDepth)
         m_editMaxDepth->setText(QString::number(Config_GetMaxWaterDepthMm() / 1000.0, 'f', 3));
+    if (m_editPortSediment)
+        m_editPortSediment->setText(QString::number(Config_GetInt("SEDIMENT_SENSOR", 3)));
+    if (m_editPortDepth)
+        m_editPortDepth->setText(QString::number(Config_GetInt("DEPTH_SENSOR", 3)));
+    if (m_editPortMotor)
+        m_editPortMotor->setText(QString::number(Config_GetInt("DC_MOTOR", 1)));
+    if (m_editPortRelay)
+        m_editPortRelay->setText(QString::number(Config_GetInt("RELAY_MODULE", 4)));
+    if (m_editPortDtu)
+        m_editPortDtu->setText(QString::number(Config_GetInt("4G_DTU", 2)));
     setActiveEdit(m_editDog ? m_editDog : m_editMaxDepth);
 }
 
@@ -1302,6 +1381,20 @@ bool NishaMainWindow::parse01Field(const QString &text, int *out, const QString 
     if (!ok || (v != 0 && v != 1)) {
         if (err)
             *err = QStringLiteral("%1 只能填 0 或 1。").arg(name);
+        return false;
+    }
+    if (out)
+        *out = v;
+    return true;
+}
+
+bool NishaMainWindow::parsePortField(const QString &text, int *out, const QString &name, QString *err) const
+{
+    bool ok = false;
+    const int v = text.trimmed().toInt(&ok);
+    if (!ok || v < 1 || v > 6) {
+        if (err)
+            *err = QStringLiteral("%1 须为串口号 1～6（COM1～COM6）。").arg(name);
         return false;
     }
     if (out)
@@ -1332,14 +1425,23 @@ void NishaMainWindow::onConfSave()
     if (m_otaUiLocked)
         return;
 
-    int dog = 0, sim = 0, lift = 0;
+    int dog = 0, lift = 0;
+    int portSed = 0, portDepth = 0, portMotor = 0, portRelay = 0, portDtu = 0;
     QString err;
     if (!parse01Field(m_editDog ? m_editDog->text() : QString(), &dog,
-                      QStringLiteral("DOG"), &err)
-            || !parse01Field(m_editSim ? m_editSim->text() : QString(), &sim,
-                             QStringLiteral("SimMissingDevices"), &err)
+                      QStringLiteral("看门狗"), &err)
             || !parse01Field(m_editLift ? m_editLift->text() : QString(), &lift,
-                             QStringLiteral("EnableManualLift"), &err)) {
+                             QStringLiteral("手动升降"), &err)
+            || !parsePortField(m_editPortSediment ? m_editPortSediment->text() : QString(),
+                               &portSed, QStringLiteral("泥沙口"), &err)
+            || !parsePortField(m_editPortDepth ? m_editPortDepth->text() : QString(),
+                               &portDepth, QStringLiteral("深度口"), &err)
+            || !parsePortField(m_editPortMotor ? m_editPortMotor->text() : QString(),
+                               &portMotor, QStringLiteral("电机口"), &err)
+            || !parsePortField(m_editPortRelay ? m_editPortRelay->text() : QString(),
+                               &portRelay, QStringLiteral("继电器口"), &err)
+            || !parsePortField(m_editPortDtu ? m_editPortDtu->text() : QString(),
+                               &portDtu, QStringLiteral("4G口"), &err)) {
         QMessageBox::warning(this, QStringLiteral("修改配置"), err);
         return;
     }
@@ -1360,19 +1462,24 @@ void NishaMainWindow::onConfSave()
     }
 
     if (Config_SetInt("DOG", dog) != 0
-            || Config_SetInt("SimMissingDevices", sim) != 0
             || Config_SetInt("EnableManualLift", lift) != 0
-            || Config_SetDouble("MaxWaterDepth", maxM) != 0) {
+            || Config_SetDouble("MaxWaterDepth", maxM) != 0
+            || Config_SetInt("SEDIMENT_SENSOR", portSed) != 0
+            || Config_SetInt("DEPTH_SENSOR", portDepth) != 0
+            || Config_SetInt("DC_MOTOR", portMotor) != 0
+            || Config_SetInt("RELAY_MODULE", portRelay) != 0
+            || Config_SetInt("4G_DTU", portDtu) != 0) {
         QMessageBox::warning(this, QStringLiteral("修改配置"),
                              QStringLiteral("写入 tyls.conf 失败。"));
         return;
     }
 
-    appendUiLog(QStringLiteral("配置已保存 DOG=%1 Sim=%2 Lift=%3 MaxDepth=%4m")
-                    .arg(dog).arg(sim).arg(lift).arg(maxM, 0, 'f', 3));
+    appendUiLog(QStringLiteral("配置已保存 DOG=%1 Lift=%2 Max=%3 口泥/深/电/继/4G=%4/%5/%6/%7/%8")
+                    .arg(dog).arg(lift).arg(maxM, 0, 'f', 1)
+                    .arg(portSed).arg(portDepth).arg(portMotor).arg(portRelay).arg(portDtu));
     QMessageBox::information(this, QStringLiteral("修改配置"),
                              QStringLiteral("已写入配置文件。\n"
-                                            "最大水深立即生效；模拟外设 / 手动升降入口等需重启后完全生效。"));
+                                            "最大水深可立即生效；串口映射 / 手动升降等需重启后生效。"));
     loadConfView();
     m_stack->setCurrentWidget(m_pageConf);
 }

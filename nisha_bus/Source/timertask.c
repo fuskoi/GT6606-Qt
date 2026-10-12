@@ -21,6 +21,14 @@ void StartRtcTimer(void)
 
 void *TimerFunction(void *arg)
 {
+    (void)arg;
+    /* 仅本线程接收 SIGALRM，避免打断 Qt 主线程导致触控积压 */
+    {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGALRM);
+        pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    }
     SigactionInit();
     TimerInit();
     ts_printf("Timer Funciton Init Complete\n");
@@ -31,6 +39,7 @@ void *TimerFunction(void *arg)
     {
         sleep(1);
     }
+    return NULL;
 }
 
 void SigactionInit(void)

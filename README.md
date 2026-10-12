@@ -44,12 +44,11 @@
 
 ## 配置要点（tyls.conf）
 
-- 串口：COM1..6 → `/dev/ttyAMA0..5`
-- **未配置** `LORA_SCREEN` / UART1（改用 Qt 屏）
-- `4G_DTU=2`（仅 `WebLinkMode=0` 串口 DTU 回退），`SEDIMENT/DEPTH=3`，`DC_MOTOR=5`，`RELAY_MODULE=6`
+- 串口：COM1..6 → `/dev/ttyAMA0..5`（本项目默认只用 COM1–4）
+- **未配置** `LORA_SCREEN`（改用 Qt 屏）；`UART1` 作电机口
+- `4G_DTU=2`（仅 `WebLinkMode=0`），`SEDIMENT/DEPTH=3`（共口），`DC_MOTOR=1`，`RELAY_MODULE=4`
 - **上报与多普勒同板**：`WebLinkMode=1` + `SocketServerIP/Port`，经板载 4G（`usb0`）或网线（`eth0`）TCP；`run_nisha.sh` 按 `PreferUplink` 选路
 - `DOG=0`：默认关看门狗，现场确认后再开
-- **台架联调**：`SimMissingDevices=1` 时模拟深度/电机/继电器，泥沙仍走真实传感器；接齐外设后改 `0`
 
 接线与原通辽板角色一致时，只需确认 GT6606 物理串口对应关系。
 

@@ -20,7 +20,6 @@
 #include "nishatask.h"
 #include "dc_motor.h"
 #include "relay_module.h"
-#include "device_sim.h"
 
 int Nisha_BusinessStart(void)
 {
@@ -75,7 +74,6 @@ int Nisha_BusinessStart(void)
     }
 
     set_dc_motor_speed(600);
-    DeviceSim_ApplyOnline();
     NiShaUD_System_Self_Check();
     FirmwareVersion_ReportBoot(NULL);
 

@@ -2,7 +2,6 @@
 #include "SL651_2014.h"
 #include "Common.h"
 #include "SocketLink.h"
-#include "device_sim.h"
 #include "log.h"
 
 // #include "pro_head.h"
@@ -63,7 +62,6 @@ int ReadConfig(void)
     g_stM2UpFramepara.password = 0x1234;
 
     WebLink_LoadConfig();
-    DeviceSim_LoadConfig();
 
     return 0;
 }
