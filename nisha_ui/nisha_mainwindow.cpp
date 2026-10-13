@@ -840,7 +840,7 @@ void NishaMainWindow::buildUi()
         h->setObjectName(QStringLiteral("title"));
         vl->addWidget(h);
         QLabel *hint = new QLabel(
-            QStringLiteral("点选输入框后用右侧键盘填写；串口改后需重启生效。"),
+            QStringLiteral("串口填 1～6；填 0=不用该设备（泥沙口除外）。改口后需重启生效。"),
             m_pageConfEdit);
         hint->setStyleSheet(QStringLiteral("color:#5a6a7a; font-size:14px;"));
         hint->setWordWrap(true);
@@ -885,10 +885,10 @@ void NishaMainWindow::buildUi()
         placeField(0, 2, QStringLiteral("手动升降"), &m_editLift, QStringLiteral("0/1"));
         placeField(1, 0, QStringLiteral("最大水深"), &m_editMaxDepth, QStringLiteral("米"));
         placeField(2, 0, QStringLiteral("泥沙口"), &m_editPortSediment, QStringLiteral("1-6"));
-        placeField(2, 2, QStringLiteral("深度口"), &m_editPortDepth, QStringLiteral("1-6"));
-        placeField(3, 0, QStringLiteral("电机口"), &m_editPortMotor, QStringLiteral("1-6"));
-        placeField(3, 2, QStringLiteral("继电器口"), &m_editPortRelay, QStringLiteral("1-6"));
-        placeField(4, 0, QStringLiteral("4G口"), &m_editPortDtu, QStringLiteral("1-6"));
+        placeField(2, 2, QStringLiteral("深度口"), &m_editPortDepth, QStringLiteral("0不用"));
+        placeField(3, 0, QStringLiteral("电机口"), &m_editPortMotor, QStringLiteral("0不用"));
+        placeField(3, 2, QStringLiteral("继电器口"), &m_editPortRelay, QStringLiteral("0不用"));
+        placeField(4, 0, QStringLiteral("4G口"), &m_editPortDtu, QStringLiteral("0不用"));
         body->addWidget(formCard, 3);
 
         QFrame *padCard = new QFrame(m_pageConfEdit);
@@ -1356,13 +1356,13 @@ void NishaMainWindow::loadConfEditForm()
     if (m_editPortSediment)
         m_editPortSediment->setText(QString::number(Config_GetInt("SEDIMENT_SENSOR", 3)));
     if (m_editPortDepth)
-        m_editPortDepth->setText(QString::number(Config_GetInt("DEPTH_SENSOR", 3)));
+        m_editPortDepth->setText(QString::number(Config_GetInt("DEPTH_SENSOR", 0)));
     if (m_editPortMotor)
-        m_editPortMotor->setText(QString::number(Config_GetInt("DC_MOTOR", 1)));
+        m_editPortMotor->setText(QString::number(Config_GetInt("DC_MOTOR", 0)));
     if (m_editPortRelay)
-        m_editPortRelay->setText(QString::number(Config_GetInt("RELAY_MODULE", 4)));
+        m_editPortRelay->setText(QString::number(Config_GetInt("RELAY_MODULE", 0)));
     if (m_editPortDtu)
-        m_editPortDtu->setText(QString::number(Config_GetInt("4G_DTU", 2)));
+        m_editPortDtu->setText(QString::number(Config_GetInt("4G_DTU", 0)));
     setActiveEdit(m_editDog ? m_editDog : m_editMaxDepth);
 }
 
@@ -1392,9 +1392,10 @@ bool NishaMainWindow::parsePortField(const QString &text, int *out, const QStrin
 {
     bool ok = false;
     const int v = text.trimmed().toInt(&ok);
-    if (!ok || v < 1 || v > 6) {
+    /* 0=不用该设备；1～6=COM1～COM6 */
+    if (!ok || v < 0 || v > 6) {
         if (err)
-            *err = QStringLiteral("%1 须为串口号 1～6（COM1～COM6）。").arg(name);
+            *err = QStringLiteral("%1 须为 0（不用）或串口号 1～6。").arg(name);
         return false;
     }
     if (out)
@@ -1445,6 +1446,11 @@ void NishaMainWindow::onConfSave()
         QMessageBox::warning(this, QStringLiteral("修改配置"), err);
         return;
     }
+    if (portSed < 1) {
+        QMessageBox::warning(this, QStringLiteral("修改配置"),
+                             QStringLiteral("泥沙口不能为 0，须指定 COM1～COM6。"));
+        return;
+    }
 
     bool okMax = false;
     const double maxM = m_editMaxDepth ? m_editMaxDepth->text().trimmed().toDouble(&okMax) : 0.0;
@@ -1479,7 +1485,8 @@ void NishaMainWindow::onConfSave()
                     .arg(portSed).arg(portDepth).arg(portMotor).arg(portRelay).arg(portDtu));
     QMessageBox::information(this, QStringLiteral("修改配置"),
                              QStringLiteral("已写入配置文件。\n"
-                                            "最大水深可立即生效；串口映射 / 手动升降等需重启后生效。"));
+                                            "串口填 0 表示不用该设备。\n"
+                                            "最大水深可立即生效；串口映射等需重启后生效。"));
     loadConfView();
     m_stack->setCurrentWidget(m_pageConf);
 }
